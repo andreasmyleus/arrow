@@ -614,7 +614,7 @@ class Indexer:
         # Store symbols from chunks
         chunks = self.storage.get_chunks_for_file(file_id)
         for chunk in chunks:
-            if chunk.name and chunk.name != "<anonymous>" and not chunk.name.startswith("chunk_"):
+            if chunk.name and chunk.name != "<anonymous>":
                 self.storage.insert_symbol(
                     chunk_id=chunk.id,
                     name=chunk.name,

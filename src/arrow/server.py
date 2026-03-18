@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import threading
@@ -43,6 +44,10 @@ _searcher: HybridSearcher | None = None
 # Per-project state
 _watchers: dict[int, FileWatcher] = {}
 _project_locks: dict[int, threading.Lock] = {}
+
+# Extensions for non-code files that won't "break" from code changes
+_NON_CODE_EXTS = {".md", ".json", ".yaml", ".yml", ".toml", ".csv", ".xml",
+                  ".txt", ".rst", ".html", ".css", ".svg", ".lock"}
 
 
 def _get_storage() -> Storage:
@@ -565,26 +570,71 @@ def trace_dependencies(
     if not file_rec:
         return json.dumps({"error": f"File not indexed: {file}"})
 
-    imports = storage.conn.execute(
-        "SELECT symbol FROM imports WHERE source_file = ?",
-        (file_rec.id,),
-    ).fetchall()
+    effective_pid = file_rec.project_id
+    depth = max(1, min(depth, 5))  # Clamp to [1, 5]
 
-    file_stem = Path(file).stem
-    importers = storage.conn.execute(
-        """SELECT DISTINCT f.path FROM imports i
-           JOIN files f ON f.id = i.source_file
-           WHERE i.symbol LIKE ?""",
-        (f"%{file_stem}%",),
-    ).fetchall()
+    def _get_imports_for(fid):
+        rows = storage.conn.execute(
+            "SELECT symbol FROM imports WHERE source_file = ?",
+            (fid,),
+        ).fetchall()
+        return [r[0] for r in rows if r[0]]
 
-    return json.dumps({
+    def _get_importers_of(fpath, pid):
+        stem = Path(fpath).stem
+        if pid is not None:
+            rows = storage.conn.execute(
+                """SELECT DISTINCT f.path FROM imports i
+                   JOIN files f ON f.id = i.source_file
+                   WHERE i.symbol LIKE ? AND f.project_id = ?""",
+                (f"%{stem}%", pid),
+            ).fetchall()
+        else:
+            rows = storage.conn.execute(
+                """SELECT DISTINCT f.path FROM imports i
+                   JOIN files f ON f.id = i.source_file
+                   WHERE i.symbol LIKE ?""",
+                (f"%{stem}%",),
+            ).fetchall()
+        return [r[0] for r in rows if r[0]]
+
+    # Level-1 results
+    imports = _get_imports_for(file_rec.id)
+    imported_by = _get_importers_of(file, effective_pid)
+
+    # Recurse for deeper levels
+    deeper_importers = {}
+    if depth > 1:
+        seen = {file}
+        frontier = list(set(imported_by))
+        for _lvl in range(depth - 1):
+            next_frontier = []
+            for imp_path in frontier:
+                if imp_path in seen:
+                    continue
+                seen.add(imp_path)
+                imp_rec = storage.get_file(imp_path, project_id=effective_pid)
+                if imp_rec:
+                    trans = _get_importers_of(imp_path, effective_pid)
+                    trans = [p for p in trans if p not in seen]
+                    if trans:
+                        deeper_importers[imp_path] = trans
+                        next_frontier.extend(trans)
+            frontier = list(set(next_frontier))
+            if not frontier:
+                break
+
+    result = {
         "file": file,
         "language": file_rec.language,
-        "imports": [row[0] for row in imports if row[0]],
-        "imported_by": [row[0] for row in importers if row[0]],
+        "imports": imports,
+        "imported_by": imported_by,
         "depth": depth,
-    }, indent=2)
+    }
+    if deeper_importers:
+        result["transitive_importers"] = deeper_importers
+
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
@@ -813,6 +863,10 @@ def get_diff_context(
             func["name"], project_id=file_rec.project_id
         )
         for caller in func_callers:
+            # Skip non-code files (docs, data files)
+            ext = Path(caller["file_path"]).suffix.lower()
+            if ext in _NON_CODE_EXTS:
+                continue
             caller_key = (caller["file_path"], caller["name"])
             if caller_key not in seen_callers:
                 seen_callers.add(caller_key)
@@ -878,11 +932,10 @@ def what_breaks_if_i_change(
             c.name for c in chunks
             if c.kind in ("function", "method", "class")
             and c.name and c.name != "<anonymous>"
+            # Skip dunder methods — __init__, __str__, etc. generate
+            # massive noise since every class has them
+            and not (c.name.startswith("__") and c.name.endswith("__"))
         ]
-
-    # Extensions for non-code files that won't "break" from code changes
-    _NON_CODE_EXTS = {".md", ".json", ".yaml", ".yml", ".toml", ".csv", ".xml",
-                      ".txt", ".rst", ".html", ".css", ".svg", ".lock"}
 
     # Find all callers for each symbol
     all_callers = []
@@ -976,13 +1029,37 @@ def resolve_symbol(
     storage = _get_storage()
     source_pid = _resolve_project_id(project)
 
-    # Search across all repos
+    # Search across all repos (exact match first)
     results = storage.resolve_symbol_across_repos(
         symbol, exclude_project_id=source_pid
     )
 
     # Also search within source project for completeness
     local_results = storage.resolve_symbol_across_repos(symbol)
+
+    # Fallback to prefix match if exact match found nothing
+    if not results and not local_results:
+        prefix_results = storage.search_symbols(symbol, limit=20)
+        for sym_rec in prefix_results:
+            file_rec = storage.get_file_by_id(sym_rec.file_id)
+            if not file_rec:
+                continue
+            proj = storage.get_project(
+                file_rec.project_id
+            ) if file_rec.project_id else None
+            chunk = storage.get_chunk_by_id(
+                sym_rec.chunk_id
+            ) if sym_rec.chunk_id else None
+            local_results.append({
+                "name": sym_rec.name,
+                "kind": sym_rec.kind,
+                "path": file_rec.path,
+                "project_id": file_rec.project_id,
+                "project_name": proj.name if proj else "",
+                "start_line": chunk.start_line if chunk else 0,
+                "end_line": chunk.end_line if chunk else 0,
+                "content_text": chunk.content_text if chunk else "",
+            })
 
     # Deduplicate: cross-repo first, then local
     seen = set()
@@ -991,13 +1068,18 @@ def resolve_symbol(
         key = (result["project_name"], result["path"], result["name"])
         if key not in seen:
             seen.add(key)
+            content = result.get("content_text", "") or ""
+            truncated = len(content) > 2000
+            if truncated:
+                content = content[:2000] + "\n... (truncated)"
             output.append({
                 "symbol": result["name"],
                 "kind": result["kind"],
                 "file": result["path"],
                 "project": result["project_name"],
                 "lines": f"{result['start_line']}-{result['end_line']}",
-                "content": result.get("content_text", ""),
+                "content": content,
+                "truncated": truncated,
                 "cross_repo": result["project_id"] != source_pid if source_pid else False,
             })
 
@@ -1059,10 +1141,14 @@ def get_tests_for(
                 chunk.name and chunk.name.startswith(pat)
                 for pat in name_patterns
             )
-            # Match by content reference
-            content_match = (
-                chunk.content_text and function in chunk.content_text
-            )
+            # Match by content reference (word-boundary to avoid
+            # false positives for short names like "get", "set")
+            content_match = False
+            if chunk.content_text and not name_match:
+                content_match = bool(
+                    re.search(rf'\b{re.escape(function)}\b',
+                              chunk.content_text)
+                )
             if name_match or content_match:
                 key = (tf.path, chunk.name)
                 if key not in seen:
@@ -1090,7 +1176,10 @@ def get_tests_for(
                 # This test file imports the source — get relevant chunks
                 chunks = storage.get_chunks_for_file(tf.id)
                 for chunk in chunks:
-                    if chunk.content_text and function in chunk.content_text:
+                    if chunk.content_text and re.search(
+                        rf'\b{re.escape(function)}\b',
+                        chunk.content_text
+                    ):
                         key = (tf.path, chunk.name)
                         if key not in seen:
                             seen.add(key)
