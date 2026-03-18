@@ -249,32 +249,39 @@ def run_benchmark(target_path: str):
     grand_arrow_tokens = 0
     grand_trad_tokens = 0
     grand_arrow_time = 0.0
+    grand_trad_time = 0.0
     tier_results = []
 
     for tier_name, queries in QUERIES.items():
         tier_arrow_tok = 0
         tier_trad_tok = 0
-        tier_time = 0.0
+        tier_arrow_time = 0.0
+        tier_trad_time = 0.0
         query_details = []
 
         for query in queries:
             start = time.perf_counter()
             ctx = searcher.get_context(query, token_budget=4000)
-            elapsed = time.perf_counter() - start
+            arrow_elapsed = time.perf_counter() - start
+
+            trad_start = time.perf_counter()
+            trad_tok = estimate_traditional_tokens(storage, query)
+            trad_elapsed = time.perf_counter() - trad_start
 
             arrow_tok = ctx["tokens_used"]
-            trad_tok = estimate_traditional_tokens(storage, query)
 
             tier_arrow_tok += arrow_tok
             tier_trad_tok += trad_tok
-            tier_time += elapsed
+            tier_arrow_time += arrow_elapsed
+            tier_trad_time += trad_elapsed
 
             savings = (1 - arrow_tok / max(trad_tok, 1)) * 100
             query_details.append({
                 "query": query,
                 "arrow_tokens": arrow_tok,
                 "trad_tokens": trad_tok,
-                "time_ms": elapsed * 1000,
+                "arrow_time_ms": arrow_elapsed * 1000,
+                "trad_time_ms": trad_elapsed * 1000,
                 "savings_pct": savings,
             })
 
@@ -284,32 +291,40 @@ def run_benchmark(target_path: str):
             "queries": len(queries),
             "arrow_tokens": tier_arrow_tok,
             "trad_tokens": tier_trad_tok,
-            "time_ms": tier_time * 1000,
+            "arrow_time_ms": tier_arrow_time * 1000,
+            "trad_time_ms": tier_trad_time * 1000,
             "savings_pct": tier_savings,
             "details": query_details,
         })
 
         grand_arrow_tokens += tier_arrow_tok
         grand_trad_tokens += tier_trad_tok
-        grand_arrow_time += tier_time
+        grand_arrow_time += tier_arrow_time
+        grand_trad_time += tier_trad_time
 
-        avg_ms = (tier_time / len(queries)) * 1000
+        arrow_avg_ms = (tier_arrow_time / len(queries)) * 1000
+        trad_avg_ms = (tier_trad_time / len(queries)) * 1000
         print(f"  {tier_name:20s}  {len(queries):3d} queries  "
               f"Arrow: {tier_arrow_tok:7,d} tok  "
               f"Trad: {tier_trad_tok:8,d} tok  "
               f"Savings: {tier_savings:5.1f}%  "
-              f"Avg: {avg_ms:.1f}ms/q")
+              f"Arrow: {arrow_avg_ms:.1f}ms/q  "
+              f"Trad: {trad_avg_ms:.1f}ms/q")
 
     print("=" * 100)
     grand_savings = (1 - grand_arrow_tokens / max(grand_trad_tokens, 1)) * 100
-    avg_ms = (grand_arrow_time / total_queries) * 1000
+    arrow_avg_ms = (grand_arrow_time / total_queries) * 1000
+    trad_avg_ms = (grand_trad_time / total_queries) * 1000
     print(f"  {'TOTAL':20s}  {total_queries:3d} queries  "
           f"Arrow: {grand_arrow_tokens:7,d} tok  "
           f"Trad: {grand_trad_tokens:8,d} tok  "
           f"Savings: {grand_savings:5.1f}%  "
-          f"Avg: {avg_ms:.1f}ms/q")
+          f"Arrow: {arrow_avg_ms:.1f}ms/q  "
+          f"Trad: {trad_avg_ms:.1f}ms/q")
     print(f"\n  Total Arrow time: {grand_arrow_time*1000:.0f}ms "
           f"({grand_arrow_time*1000/total_queries:.1f}ms per query)")
+    print(f"  Total Trad time:  {grand_trad_time*1000:.0f}ms "
+          f"({grand_trad_time*1000/total_queries:.1f}ms per query)")
 
     # Save detailed results as JSON
     output = {
@@ -318,8 +333,10 @@ def run_benchmark(target_path: str):
         "grand_arrow_tokens": grand_arrow_tokens,
         "grand_trad_tokens": grand_trad_tokens,
         "grand_savings_pct": grand_savings,
-        "total_time_ms": grand_arrow_time * 1000,
-        "avg_time_ms": avg_ms,
+        "arrow_total_time_ms": grand_arrow_time * 1000,
+        "arrow_avg_time_ms": arrow_avg_ms,
+        "trad_total_time_ms": grand_trad_time * 1000,
+        "trad_avg_time_ms": trad_avg_ms,
         "tiers": tier_results,
     }
     results_path = Path(__file__).parent / "comparison_results.json"

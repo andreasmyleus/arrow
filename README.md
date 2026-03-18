@@ -8,6 +8,7 @@ Arrow pre-indexes your codebases using tree-sitter AST parsing, then serves rele
 
 - **Multi-repo support** — index all your local repos in parallel, organized by `org/repo`, in one shared database
 - **Git-aware** — tracks branch + HEAD commit per project, auto-updates when commits change
+- **Git history snapshots** — index code at any commit, tag, or branch for historical search
 - **GitHub remote caching** — cache content from GitHub MCP reads for cross-project search
 - **AST-based chunking** — tree-sitter parses code into semantic units (functions, classes) across 64+ languages
 - **Hybrid search** — BM25 full-text (FTS5) + semantic vector search (usearch + ONNX embeddings)
@@ -51,23 +52,23 @@ Real-world coding tasks on Arrow's own codebase (22 files, ~4k lines). Arrow use
 
 ### Comprehensive Benchmark (110 queries, 10 complexity tiers)
 
-Tested across query types ranging from simple symbol lookups to broad architectural reviews. All queries use a 4000-token budget. Benchmarked on Arrow's own codebase (14 files, 47 chunks).
+Tested across query types ranging from simple symbol lookups to broad architectural reviews. All queries use a 4000-token budget. Benchmarked on Arrow's own codebase (14 files, 54 chunks).
 
-| Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings | Avg Time |
-|-----------------|---------|-------------|-------------------|---------|----------|
-| Symbol lookup | 15 | 57,468 | 302,607 | 81% | 0.4ms |
-| Method lookup | 15 | 42,768 | 190,510 | 78% | 0.4ms |
-| Single concept | 10 | 25,763 | 133,193 | 81% | 0.4ms |
-| Two concepts | 10 | 39,413 | 173,685 | 77% | 0.5ms |
-| How-does-X-work | 10 | 35,929 | 248,423 | 86% | 0.9ms |
-| Cross-file tracing | 10 | 31,761 | 205,294 | 85% | 0.9ms |
-| Debugging | 10 | 35,453 | 230,516 | 85% | 0.8ms |
-| Implementation planning | 10 | 39,826 | 263,587 | 85% | 0.9ms |
-| Architecture review | 10 | 39,891 | 666,190 | 94% | 0.9ms |
-| Broad / exploratory | 10 | 39,778 | 770,235 | 95% | 1.0ms |
-| **Total** | **110** | **388,050** | **3,184,240** | **88%** | **0.7ms** |
+| Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings | Avg Query Time |
+|-----------------|---------|-------------|-------------------|---------|----------------|
+| Symbol lookup | 15 | 57,308 | 342,022 | 83% | 0.4ms |
+| Method lookup | 15 | 46,376 | 221,331 | 79% | 0.3ms |
+| Single concept | 10 | 25,744 | 153,949 | 83% | 0.3ms |
+| Two concepts | 10 | 39,361 | 206,620 | 81% | 0.5ms |
+| How-does-X-work | 10 | 35,877 | 292,943 | 88% | 0.9ms |
+| Cross-file tracing | 10 | 31,851 | 246,602 | 87% | 0.7ms |
+| Debugging | 10 | 35,947 | 278,280 | 87% | 0.8ms |
+| Implementation planning | 10 | 39,917 | 308,732 | 87% | 0.8ms |
+| Architecture review | 10 | 39,948 | 787,690 | 95% | 0.7ms |
+| Broad / exploratory | 10 | 39,937 | 907,095 | 96% | 0.9ms |
+| **Total** | **110** | **392,266** | **3,745,264** | **90%** | **0.6ms** |
 
-**Total benchmark time: 76ms** (0.7ms avg per query). Savings scale with query complexity — simple lookups save ~77-81%, while broad architectural questions save 94-95% because the traditional approach reads entire files.
+**Total benchmark time: 65ms** (0.6ms avg per query). Savings scale with query complexity — simple lookups save ~79-83%, while broad architectural questions save 95-96% because the traditional approach reads entire files. The traditional approach's real cost is token consumption (3.7M tokens) rather than query time — each query reads entire matching files rather than targeted chunks.
 
 ## CLI
 
@@ -83,6 +84,8 @@ Commands:
   context   Get relevant code within a token budget
   status    Show index status and stats
   repos     List all indexed projects
+  snapshot  Index at a specific git commit/tag/branch
+  pr        Index both sides of a pull request
   symbols   Search for symbols (functions, classes, etc.)
   remove    Remove a project from the index
 ```
@@ -111,6 +114,20 @@ arrow context "authentication flow" --budget 4000
 
 # Find all functions named "parse"
 arrow symbols parse --kind function
+
+# Index code at a specific commit, tag, or branch
+arrow snapshot /path/to/project v1.2.0
+arrow snapshot /path/to/project abc1234
+arrow snapshot /path/to/project feature/old-branch
+
+# Search across snapshots
+arrow search "authentication" --project "org/repo@v1.2.0"
+
+# Index both sides of a PR for review
+arrow pr /path/to/project 123
+# Then search either side:
+arrow search "auth" --project "org/repo@base:PR-123"
+arrow search "auth" --project "org/repo@pr:PR-123"
 
 # Remove a project from the index
 arrow remove org/repo
@@ -154,11 +171,13 @@ Or via MCP in Claude Code:
 > Index my codebase at /path/to/project
 ```
 
-### 3. Available MCP Tools (10)
+### 3. Available MCP Tools (12)
 
 | Tool | Description |
 |------|-------------|
 | `index_codebase(path)` | Index/re-index a codebase (auto-detects git org/repo) |
+| `index_git_commit(path, ref)` | Index at a specific commit/tag/branch (creates `org/repo@ref` snapshot) |
+| `index_pr(path, pr_number)` | Index both sides of a PR (base + head) for review and comparison |
 | `get_context(query, token_budget, project?)` | **Main tool.** Get relevant code within a token budget |
 | `search_code(query, project?)` | Hybrid BM25 + semantic search |
 | `search_structure(symbol, project?)` | Find definitions by name via AST index |
@@ -218,8 +237,10 @@ Arrow tracks all your repos in one shared database, organized by `org/repo` (aut
 - **Auto-detection** — `index_codebase(/path/to/repo)` reads `git remote get-url origin` to determine `org/repo` identity. Falls back to directory name if not a git repo.
 - **Branch + commit tracking** — each project stores current branch and HEAD commit. Re-indexing detects when commits change.
 - **Per-project file watchers** — each local project gets its own watchdog instance, auto-started on server startup.
+- **Git history snapshots** — `index_git_commit(path, ref)` indexes code at any commit SHA, tag, or branch. Creates a snapshot project like `org/repo@v1.2.0` that can be searched independently.
+- **PR review** — `index_pr(path, pr_number)` indexes both sides of a pull request (merge base + head). Creates `org/repo@base:PR-N` and `org/repo@pr:PR-N` projects with the list of changed files, so you can search and compare code before and after the PR.
 - **GitHub content caching** — `index_github_content(owner, repo, branch, files)` lets Claude pass file contents from GitHub MCP reads into Arrow for search.
-- **Scoped search** — pass `project="org/repo"` to any search tool to scope results, or omit to search everything.
+- **Scoped search** — pass `project="org/repo"` or `project="org/repo@v1.0"` to any search tool to scope results, or omit to search everything.
 
 ### Concurrent Safety
 

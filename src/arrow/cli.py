@@ -90,6 +90,87 @@ def cmd_index(args):
     storage.close()
 
 
+def cmd_snapshot(args):
+    """Index a codebase at a specific git commit/tag/branch."""
+    _setup_logging(args.log_level)
+
+    root = Path(args.path).resolve()
+    if not root.is_dir():
+        print(f"Error: {args.path} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    storage, indexer, _ = _get_components(args.db_path, args.vec_path)
+
+    print(f"Indexing {root} at {args.ref}...")
+    result = indexer.index_git_commit(root, args.ref)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        storage.close()
+        sys.exit(1)
+
+    if result.get("status") == "already indexed":
+        print(f"  Already indexed: {result['project_name']}")
+        storage.close()
+        return
+
+    print(f"  Project:        {result.get('project_name', '?')}")
+    if result.get("commit"):
+        commit = result["commit"]
+        print(f"  Commit:         {commit['short_sha']} — {commit['message']}")
+        print(f"  Author:         {commit['author']} ({commit['date']})")
+    print(f"  Files scanned:  {result['files_scanned']}")
+    print(f"  Files indexed:  {result['files_indexed']}")
+    print(f"  Chunks created: {result['chunks_created']}")
+    print(f"  Languages:      {result['languages']}")
+    print(f"  Time:           {result['elapsed']}")
+
+    if result.get("errors"):
+        print(f"  Errors:         {result['errors']}")
+
+    storage.close()
+
+
+def cmd_pr(args):
+    """Index both sides of a pull request."""
+    _setup_logging(args.log_level)
+
+    root = Path(args.path).resolve()
+    if not root.is_dir():
+        print(f"Error: {args.path} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    storage, indexer, _ = _get_components(args.db_path, args.vec_path)
+
+    print(f"Indexing PR #{args.number} in {root}...")
+    result = indexer.index_pr(root, args.number)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        storage.close()
+        sys.exit(1)
+
+    print(f"  PR:             #{result['pr_number']} — {result['title']}")
+    print(f"  Base:           {result['base_branch']} ({result['base_commit']})")
+    print(f"  Head:           {result['head_branch']} ({result['head_commit']})")
+    print(f"  Changed files:  {result['changed_file_count']}")
+    print(f"  Base project:   {result['base_project']}")
+    print(f"  Head project:   {result['head_project']}")
+    print(f"  Time:           {result['elapsed']}")
+
+    if result["changed_files"]:
+        print(f"\n  Changed files:")
+        for f in result["changed_files"][:30]:
+            print(f"    {f}")
+        if result["changed_file_count"] > 30:
+            print(f"    ... and {result['changed_file_count'] - 30} more")
+
+    print(f"\n  Search base: arrow search \"query\" --project \"{result['base_project']}\"")
+    print(f"  Search head: arrow search \"query\" --project \"{result['head_project']}\"")
+
+    storage.close()
+
+
 def cmd_search(args):
     """Search the indexed codebase."""
     _setup_logging("WARNING")
@@ -368,6 +449,26 @@ def main():
     p_sym.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_sym.add_argument("--project", type=str, default=None, help="Project name filter")
     p_sym.set_defaults(func=cmd_symbols)
+
+    # snapshot
+    p_snap = subparsers.add_parser("snapshot", help="Index at a specific git commit/tag/branch")
+    p_snap.add_argument("path", help="Path to the git repository")
+    p_snap.add_argument("ref", help="Git ref: commit SHA, tag, or branch name")
+    p_snap.add_argument(
+        "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO", help="Log level",
+    )
+    p_snap.set_defaults(func=cmd_snapshot)
+
+    # pr
+    p_pr = subparsers.add_parser("pr", help="Index both sides of a pull request")
+    p_pr.add_argument("path", help="Path to the git repository")
+    p_pr.add_argument("number", type=int, help="PR number")
+    p_pr.add_argument(
+        "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO", help="Log level",
+    )
+    p_pr.set_defaults(func=cmd_pr)
 
     # remove
     p_remove = subparsers.add_parser("remove", help="Remove a project from the index")

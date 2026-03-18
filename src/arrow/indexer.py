@@ -14,7 +14,10 @@ import tiktoken
 
 from .chunker import chunk_file, compress_content, detect_language
 from .discovery import discover_files
-from .git_utils import get_git_info
+from .git_utils import (
+    get_changed_files_between, get_commit_info, get_file_at_commit,
+    get_git_info, get_pr_refs, list_files_at_commit, resolve_commit,
+)
 from .hasher import hash_content, hash_file
 from .storage import Storage
 
@@ -336,6 +339,252 @@ class Indexer:
         stats["elapsed"] = f"{elapsed:.2f}s"
         stats["languages"] = dict(stats["languages"].most_common())
         return stats
+
+    def index_git_commit(
+        self,
+        root: str | Path,
+        ref: str,
+    ) -> dict:
+        """Index a codebase at a specific git commit, tag, or branch.
+
+        Creates a snapshot project named "org/repo@<short_ref>" that can be
+        searched independently. Useful for comparing code across versions or
+        investigating historical code.
+
+        Args:
+            root: Path to the git repository.
+            ref: Git ref — commit SHA, tag, or branch name.
+
+        Returns:
+            Status dict with counts and project info.
+        """
+        root = Path(root).resolve()
+        start_time = time.time()
+
+        # Resolve ref to full SHA
+        full_sha = resolve_commit(root, ref)
+        if not full_sha:
+            return {"error": f"Cannot resolve git ref: {ref}"}
+
+        commit_info = get_commit_info(root, full_sha)
+        if not commit_info:
+            return {"error": f"Cannot get commit info for: {ref}"}
+
+        # Determine project identity
+        git_info = get_git_info(root)
+        base_name = git_info["name"]
+        short_ref = commit_info["short_sha"]
+
+        # Use tag/branch name if ref isn't a raw SHA
+        if ref != full_sha and not ref.startswith(full_sha[:7]):
+            short_ref = ref
+
+        snapshot_name = f"{base_name}@{short_ref}"
+
+        # Check if this exact snapshot already exists
+        existing = self.storage.get_project_by_name(snapshot_name)
+        if existing and existing.git_commit == full_sha:
+            return {
+                "project_id": existing.id,
+                "project_name": snapshot_name,
+                "status": "already indexed",
+                "commit": commit_info,
+            }
+
+        # Create or update the snapshot project
+        project_id = self.storage.create_project(
+            name=snapshot_name,
+            root_path=str(root),
+            remote_url=git_info["remote_url"],
+            git_branch=short_ref,
+            git_commit=full_sha,
+            is_remote=False,
+        )
+
+        # List files at that commit
+        all_files = list_files_at_commit(root, full_sha)
+        if not all_files:
+            return {"error": f"No files found at commit {ref}"}
+
+        # Filter to files with known language extensions
+        files = [f for f in all_files if detect_language(PurePosixPath(f))]
+
+        stats = {
+            "files_scanned": len(all_files),
+            "files_indexed": 0,
+            "chunks_created": 0,
+            "errors": 0,
+            "languages": Counter(),
+            "project_id": project_id,
+            "project_name": snapshot_name,
+            "commit": commit_info,
+        }
+
+        new_chunk_ids: list[int] = []
+        new_chunk_texts: list[str] = []
+
+        for file_path in files:
+            content = get_file_at_commit(root, full_sha, file_path)
+            if content is None:
+                stats["errors"] += 1
+                continue
+
+            # Skip very large files (>1MB)
+            if len(content) > 1_000_000:
+                continue
+
+            content_hash_val = hash_content(content)
+
+            # Check if already indexed with same hash
+            existing_file = self.storage.get_file(file_path, project_id=project_id)
+            if existing_file and existing_file.content_hash == content_hash_val:
+                continue
+
+            virtual_path = PurePosixPath(file_path)
+            language = detect_language(virtual_path)
+            if language:
+                stats["languages"][language] += 1
+
+            file_id = self.storage.upsert_file(
+                file_path, content_hash_val, language, project_id=project_id
+            )
+            self.storage.delete_chunks_for_file(file_id)
+
+            chunks = chunk_file(virtual_path, content)
+
+            batch = []
+            for chunk in chunks:
+                compressed = compress_content(chunk.content)
+                token_count = count_tokens(chunk.content)
+                batch.append((
+                    file_id,
+                    chunk.name,
+                    chunk.kind,
+                    chunk.start_line,
+                    chunk.end_line,
+                    compressed,
+                    chunk.content,
+                    chunk.scope_context,
+                    token_count,
+                    project_id,
+                ))
+
+            if batch:
+                self.storage.insert_chunks_batch(batch)
+                stats["chunks_created"] += len(batch)
+
+                file_chunks = self.storage.get_chunks_for_file(file_id)
+                for fc in file_chunks:
+                    new_chunk_ids.append(fc.id)
+                    new_chunk_texts.append(fc.content_text or "")
+
+            self._extract_structure(file_id, virtual_path, content, language)
+            stats["files_indexed"] += 1
+
+        self.storage.commit()
+
+        elapsed = time.time() - start_time
+        lang_stats = json.dumps(dict(stats["languages"].most_common()))
+        self.storage.update_project_indexed(project_id, f"{elapsed:.2f}s", lang_stats)
+
+        if new_chunk_ids:
+            self._embed_chunks_async(new_chunk_ids, new_chunk_texts)
+
+        stats["elapsed"] = f"{elapsed:.2f}s"
+        stats["languages"] = dict(stats["languages"].most_common())
+        return stats
+
+    def index_pr(
+        self,
+        root: str | Path,
+        pr_number: int,
+    ) -> dict:
+        """Index both sides of a pull request for comparison.
+
+        Uses `gh pr view` to get PR metadata, then indexes:
+        - The merge base (common ancestor) as "org/repo@base:PR-N"
+        - The PR head commit as "org/repo@pr:PR-N"
+
+        Also returns the list of changed files for easy diffing.
+
+        Args:
+            root: Path to the git repository.
+            pr_number: PR number.
+
+        Returns:
+            Status dict with base/head project info and changed files.
+        """
+        root = Path(root).resolve()
+        start_time = time.time()
+
+        pr_info = get_pr_refs(root, pr_number)
+        if pr_info is None:
+            return {
+                "error": f"Cannot get PR #{pr_number} info. "
+                "Is `gh` CLI installed and authenticated?"
+            }
+
+        head_sha = pr_info["head_sha"]
+        # Use merge base for accurate "what was the code before this PR"
+        base_sha = pr_info["merge_base"] or pr_info["base_sha"]
+
+        if not head_sha or not base_sha:
+            return {"error": f"Cannot resolve commits for PR #{pr_number}"}
+
+        # Get changed files
+        changed = get_changed_files_between(root, base_sha, head_sha)
+
+        # Index base snapshot
+        base_result = self.index_git_commit(root, base_sha)
+        base_name = base_result.get("project_name", "?")
+
+        # Rename to a PR-specific name for clarity
+        git_info = get_git_info(root)
+        pr_base_name = f"{git_info['name']}@base:PR-{pr_number}"
+        pr_head_name = f"{git_info['name']}@pr:PR-{pr_number}"
+
+        # Rename base project
+        if "project_id" in base_result:
+            self.storage.conn.execute(
+                "UPDATE projects SET name = ? WHERE id = ? AND name = ?",
+                (pr_base_name, base_result["project_id"], base_name),
+            )
+            self.storage.conn.commit()
+
+        # Index head snapshot
+        head_result = self.index_git_commit(root, head_sha)
+        head_name = head_result.get("project_name", "?")
+
+        if "project_id" in head_result:
+            self.storage.conn.execute(
+                "UPDATE projects SET name = ? WHERE id = ? AND name = ?",
+                (pr_head_name, head_result["project_id"], head_name),
+            )
+            self.storage.conn.commit()
+
+        elapsed = time.time() - start_time
+
+        return {
+            "pr_number": pr_number,
+            "title": pr_info["title"],
+            "base_branch": pr_info["base_branch"],
+            "head_branch": pr_info["head_branch"],
+            "base_project": pr_base_name,
+            "head_project": pr_head_name,
+            "base_commit": base_sha[:8],
+            "head_commit": head_sha[:8],
+            "changed_files": changed,
+            "changed_file_count": len(changed),
+            "base_result": {
+                "files_indexed": base_result.get("files_indexed", 0),
+                "status": base_result.get("status", "indexed"),
+            },
+            "head_result": {
+                "files_indexed": head_result.get("files_indexed", 0),
+                "status": head_result.get("status", "indexed"),
+            },
+            "elapsed": f"{elapsed:.2f}s",
+        }
 
     def _extract_structure(
         self, file_id: int, filepath, content: str, language: Optional[str]

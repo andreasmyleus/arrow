@@ -486,6 +486,77 @@ def index_github_content(
 
 
 @mcp.tool()
+def index_git_commit(path: str, ref: str) -> str:
+    """Index a codebase at a specific git commit, tag, or branch.
+
+    Creates a snapshot project named "org/repo@<ref>" that can be searched
+    independently. Useful for comparing code across versions, investigating
+    old commits, or caching historical code state.
+
+    Args:
+        path: Path to the local git repository.
+        ref: Git ref — commit SHA (full or short), tag name, or branch name.
+
+    Returns:
+        JSON status with file/chunk counts, commit info, and timing.
+    """
+    root = Path(path).resolve()
+    if not root.is_dir():
+        return json.dumps({"error": f"Not a directory: {path}"})
+
+    indexer = _get_indexer()
+
+    # Acquire lock based on the root path (not project, since it may not exist yet)
+    lock_key = f"snapshot:{root}:{ref}"
+    lock = _project_locks.setdefault(lock_key, threading.Lock())
+    if not lock.acquire(timeout=30):
+        return json.dumps({"error": "Another indexing operation is in progress for this ref"})
+
+    try:
+        result = indexer.index_git_commit(root, ref)
+    finally:
+        lock.release()
+
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def index_pr(path: str, pr_number: int) -> str:
+    """Index both sides of a pull request for comparison and review.
+
+    Uses `gh pr view` to get PR metadata, then indexes the merge base
+    (before the PR) and the PR head (after the PR). Both snapshots are
+    searchable independently, and the list of changed files is returned.
+
+    Args:
+        path: Path to the local git repository.
+        pr_number: Pull request number.
+
+    Returns:
+        JSON with base/head project names, changed files, and commit info.
+        Use the project names with search_code() or get_context() to search
+        either side of the PR.
+    """
+    root = Path(path).resolve()
+    if not root.is_dir():
+        return json.dumps({"error": f"Not a directory: {path}"})
+
+    indexer = _get_indexer()
+
+    lock_key = f"pr:{root}:{pr_number}"
+    lock = _project_locks.setdefault(lock_key, threading.Lock())
+    if not lock.acquire(timeout=60):
+        return json.dumps({"error": "Another PR indexing operation is in progress"})
+
+    try:
+        result = indexer.index_pr(root, pr_number)
+    finally:
+        lock.release()
+
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
 def remove_project(project: str) -> str:
     """Remove a project and all its indexed data.
 

@@ -393,6 +393,67 @@ class TestIndexer:
         assert proj.is_remote
         assert proj.git_branch == "main"
 
+    def test_index_git_commit(self, db, tmp_path):
+        import subprocess
+        # Create a git repo with two commits
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "remote", "add", "origin",
+             "https://github.com/testorg/testrepo.git"],
+            capture_output=True,
+        )
+        (tmp_path / "main.py").write_text("def hello():\n    return 'v1'\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "v1",
+             "--author", "Test <test@test.com>"],
+            capture_output=True,
+        )
+        from arrow.git_utils import get_git_info
+        first_commit = get_git_info(tmp_path)["commit"]
+
+        (tmp_path / "main.py").write_text("def hello():\n    return 'v2'\n")
+        (tmp_path / "utils.py").write_text("def add(a, b):\n    return a + b\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "v2",
+             "--author", "Test <test@test.com>"],
+            capture_output=True,
+        )
+
+        idx = Indexer(db)
+
+        # Index at first commit — should only have main.py
+        result = idx.index_git_commit(tmp_path, first_commit)
+        assert "error" not in result
+        assert result["files_indexed"] == 1  # only main.py (README.md not a code file)
+        assert result["project_name"].endswith(first_commit[:7])
+        assert result["commit"]["message"] == "v1"
+
+        # Index at HEAD — should have both files
+        result2 = idx.index_git_commit(tmp_path, "HEAD")
+        assert "error" not in result2
+        assert result2["files_indexed"] == 2
+
+        # Both snapshots exist as separate projects
+        projects = db.list_projects()
+        snapshot_names = [p.name for p in projects]
+        assert any(first_commit[:7] in n for n in snapshot_names)
+
+    def test_index_git_commit_invalid_ref(self, db, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        (tmp_path / "file.py").write_text("x = 1")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "init",
+             "--author", "Test <test@test.com>"],
+            capture_output=True,
+        )
+        idx = Indexer(db)
+        result = idx.index_git_commit(tmp_path, "nonexistent_ref_xyz")
+        assert "error" in result
+
 
 # --- Search tests ---
 
