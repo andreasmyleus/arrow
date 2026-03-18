@@ -14,6 +14,10 @@ from .vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
+# Non-code languages get a score penalty so they don't dominate search results
+_NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
+_NON_CODE_PENALTY = 0.3  # Multiply score by this factor
+
 _encoder: Optional[tiktoken.Encoding] = None
 
 
@@ -175,6 +179,28 @@ class HybridSearcher:
                 fused = sorted(
                     boosted, key=lambda x: x[1], reverse=True
                 )
+
+        # Penalize non-code files (json, markdown, etc.) so they don't
+        # dominate results over actual source code
+        penalty_ids = [cid for cid, _ in fused[:limit * 3]]
+        if penalty_ids:
+            penalty_chunks = {
+                c.id: c.file_id
+                for c in self.storage.get_chunks_by_ids(penalty_ids)
+            }
+            penalty_files = {}
+            for fid in set(penalty_chunks.values()):
+                rec = self.storage.get_file_by_id(fid)
+                if rec:
+                    penalty_files[fid] = rec
+            penalized = []
+            for cid, score in fused:
+                fid = penalty_chunks.get(cid)
+                frec = penalty_files.get(fid) if fid else None
+                if frec and frec.language in _NON_CODE_LANGS:
+                    score = score * _NON_CODE_PENALTY
+                penalized.append((cid, score))
+            fused = sorted(penalized, key=lambda x: x[1], reverse=True)
 
         # Batch fetch chunks and files to avoid N+1 queries
         top = fused[:limit]

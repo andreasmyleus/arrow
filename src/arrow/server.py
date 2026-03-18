@@ -387,6 +387,8 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
     Returns:
         JSON array of matching code chunks with file path, project, and content.
     """
+    limit = max(1, min(limit, 100))  # Clamp to [1, 100]
+
     storage = _get_storage()
     if not storage.list_projects():
         return json.dumps({
@@ -637,7 +639,7 @@ def file_summary(path: str, project: str | None = None) -> str:
         "functions": functions,
         "classes": classes,
         "other": other,
-        "imports": [row[0] for row in imports],
+        "imports": [row[0] for row in imports if row[0]],
     }, indent=2)
 
 
@@ -1575,10 +1577,14 @@ def store_memory(
     Returns:
         JSON confirmation with memory ID.
     """
+    if not key or not key.strip():
+        return json.dumps({"error": "key is required"})
+    if not content or not content.strip():
+        return json.dumps({"error": "content is required"})
     storage = _get_storage()
     project_id = _resolve_project_id(project)
     mem_id = storage.store_memory(
-        key, content, category=category, project_id=project_id
+        key.strip(), content, category=category, project_id=project_id
     )
     return json.dumps({
         "stored": True,
@@ -1671,6 +1677,8 @@ def delete_memory(
     Returns:
         JSON confirmation with count deleted.
     """
+    if memory_id is None and key is None:
+        return json.dumps({"error": "Provide memory_id or key to delete"})
     storage = _get_storage()
     project_id = _resolve_project_id(project)
     count = storage.delete_memory(
