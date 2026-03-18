@@ -319,6 +319,28 @@ pytest tests/ -v
 python benchmarks/bench.py /path/to/codebase
 ```
 
+## Feature Roadmap
+
+### Medium Impact
+
+- **Frecency-weighted results** — boost recently/frequently accessed files in search ranking. Files Claude edits often should surface first.
+- **Chunk-level summaries** — LLM-generated one-line summaries per function/class, stored alongside code. Enables "describe the auth module" without reading code.
+- **Multi-language import resolution** — resolve `require()`, `use`, `import` across JS/TS, Rust, Go, Java — not just Python.
+- **Stale index detection** — warn when the index is outdated vs working tree. Track drift percentage.
+- **Conversation-aware context** — track which chunks Claude has already seen in the current session. Avoid re-sending the same code.
+- **Custom chunk boundaries** — let users mark chunk boundaries with `// @arrow-chunk` comments for domain-specific splitting.
+- **Monorepo workspace support** — `arrow.json` config file to define sub-projects within a monorepo with independent watch roots.
+
+### Low Impact / Experimental
+
+- **Type-aware search** — index type annotations and signatures separately. "Functions that return `Optional[User]`" becomes a searchable query.
+- **Dead code detection** — find functions with zero callers across the full index. `arrow deadcode --project org/repo`.
+- **Embedding model hot-swap** — swap embedding models without re-indexing by storing raw text alongside vectors.
+- **Index export/import** — `arrow export org/repo > index.tar.zst` for sharing indexes across machines or CI.
+- **Persistent query cache** — cache search results by query hash. Invalidate on re-index. Sub-microsecond repeated queries.
+- **MCP tool usage analytics** — track which tools are called most, average latency, token savings per session.
+- **Language server integration** — consume LSP hover/definition data for more accurate cross-file resolution.
+
 ## License
 
 MIT
