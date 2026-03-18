@@ -3,7 +3,6 @@
 import json
 import os
 import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -39,46 +38,6 @@ def project_dir_b(tmp_path):
         "class Database:\n    def connect(self):\n        pass\n"
     )
     return d
-
-
-@pytest.fixture(autouse=True)
-def clean_server_state():
-    """Reset server global state between tests."""
-    import arrow.server as srv
-    srv._storage = None
-    srv._indexer = None
-    srv._vector_store = None
-    srv._embedder = None
-    srv._searcher = None
-    srv._watchers.clear()
-    srv._project_locks.clear()
-    yield
-    # Cleanup
-    for watcher in list(srv._watchers.values()):
-        watcher.stop()
-    srv._watchers.clear()
-    if srv._storage is not None:
-        srv._storage.close()
-
-
-@pytest.fixture
-def setup_server(project_dir):
-    """Set up server with a temp DB and index a project."""
-    db_path = tempfile.mktemp(suffix=".db")
-    vec_path = tempfile.mktemp(suffix=".usearch")
-    os.environ["ARROW_DB_PATH"] = db_path
-    os.environ["ARROW_VECTOR_PATH"] = vec_path
-
-    from arrow.server import index_codebase
-    index_codebase(str(project_dir))
-
-    yield project_dir, db_path, vec_path
-
-    os.environ.pop("ARROW_DB_PATH", None)
-    os.environ.pop("ARROW_VECTOR_PATH", None)
-    for p in (db_path, vec_path):
-        if os.path.exists(p):
-            os.unlink(p)
 
 
 class TestServerTools:

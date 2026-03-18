@@ -1540,6 +1540,137 @@ def compact_context(
 
 
 @mcp.tool()
+def store_memory(
+    key: str, content: str,
+    category: str = "general",
+    project: str | None = None,
+) -> str:
+    """Store a long-term memory that persists across sessions.
+
+    Use this to save knowledge about the codebase, architectural
+    decisions, conventions, or any context that should survive
+    session resets. Memories are searchable by content.
+
+    Args:
+        key: Short identifier (e.g. "auth-pattern", "db-convention").
+        content: The knowledge to remember.
+        category: Group memories: "architecture", "convention",
+                  "decision", "note", "general" (default).
+        project: Optional project scope. Omit for global memories.
+
+    Returns:
+        JSON confirmation with memory ID.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+    mem_id = storage.store_memory(
+        key, content, category=category, project_id=project_id
+    )
+    return json.dumps({
+        "stored": True,
+        "id": mem_id,
+        "key": key,
+        "category": category,
+        "project": project,
+    })
+
+
+@mcp.tool()
+def recall_memory(
+    query: str,
+    category: str | None = None,
+    project: str | None = None,
+    limit: int = 10,
+) -> str:
+    """Recall stored memories by searching their content.
+
+    Searches across all stored memories using full-text search.
+    Returns the most relevant memories matching the query.
+
+    Args:
+        query: What to search for in memories.
+        category: Optional filter by category.
+        project: Optional project scope. Omit for all.
+        limit: Max memories to return (default 10).
+
+    Returns:
+        JSON array of matching memories.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+    try:
+        results = storage.recall_memory(
+            query, category=category,
+            project_id=project_id, limit=limit,
+        )
+    except Exception:
+        # FTS match can fail on some query syntax
+        results = []
+
+    return json.dumps({
+        "query": query,
+        "total": len(results),
+        "memories": results,
+    }, indent=2)
+
+
+@mcp.tool()
+def list_memories(
+    category: str | None = None,
+    project: str | None = None,
+) -> str:
+    """List all stored memories.
+
+    Args:
+        category: Optional filter by category.
+        project: Optional project scope.
+
+    Returns:
+        JSON array of all memories.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+    results = storage.list_memories(
+        category=category, project_id=project_id
+    )
+    return json.dumps({
+        "total": len(results),
+        "memories": results,
+    }, indent=2)
+
+
+@mcp.tool()
+def delete_memory(
+    memory_id: int | None = None,
+    key: str | None = None,
+    category: str | None = None,
+    project: str | None = None,
+) -> str:
+    """Delete a stored memory by ID or by key.
+
+    Args:
+        memory_id: Delete by specific ID.
+        key: Delete by key name.
+        category: Required with key if ambiguous.
+        project: Project scope for key-based deletion.
+
+    Returns:
+        JSON confirmation with count deleted.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+    count = storage.delete_memory(
+        memory_id=memory_id, key=key,
+        category=category, project_id=project_id,
+    )
+    return json.dumps({
+        "deleted": count,
+        "memory_id": memory_id,
+        "key": key,
+    })
+
+
+@mcp.tool()
 def remove_project(project: str) -> str:
     """Remove a project and all its indexed data.
 

@@ -592,6 +592,67 @@ def cmd_compact(args):
         print("  Session cleared.")
 
 
+def cmd_remember(args):
+    """Store a memory."""
+    _setup_logging("WARNING")
+    from .server import store_memory
+    result = json.loads(store_memory(
+        args.key, args.content,
+        category=args.category, project=args.project,
+    ))
+    print(f"Stored memory '{result['key']}'"
+          f" (category: {result['category']}, id: {result['id']})")
+
+
+def cmd_recall(args):
+    """Recall memories."""
+    _setup_logging("WARNING")
+    from .server import recall_memory
+    result = json.loads(recall_memory(
+        args.query, category=args.category,
+        project=args.project,
+    ))
+    if not result["memories"]:
+        print("No memories found.")
+        return
+    for mem in result["memories"]:
+        print(f"\n[{mem['category']}] {mem['key']}"
+              f" (accessed {mem['access_count']}x)")
+        print(f"  {mem['content']}")
+
+
+def cmd_forget(args):
+    """Delete a memory."""
+    _setup_logging("WARNING")
+    from .server import delete_memory
+    result = json.loads(delete_memory(
+        memory_id=args.id, key=args.key,
+        category=args.category, project=args.project,
+    ))
+    print(f"Deleted {result['deleted']} memory/memories.")
+
+
+def cmd_memories(args):
+    """List all memories."""
+    _setup_logging("WARNING")
+    from .server import list_memories
+    result = json.loads(list_memories(
+        category=args.category, project=args.project,
+    ))
+    if not result["memories"]:
+        print("No memories stored.")
+        return
+    print(f"Memories ({result['total']}):\n")
+    for mem in result["memories"]:
+        print(f"  [{mem['category']:12s}] {mem['key']:25s}"
+              f" (id:{mem['id']}, used {mem['access_count']}x)")
+        # Truncate long content
+        content = mem["content"]
+        if len(content) > 80:
+            content = content[:77] + "..."
+        print(f"    {content}")
+
+
 def cmd_remove(args):
     """Remove a project from the index."""
     _setup_logging("WARNING")
@@ -780,6 +841,42 @@ def main():
         help="Clear session history after compacting",
     )
     p_compact.set_defaults(func=cmd_compact)
+
+    p_remember = subparsers.add_parser(
+        "remember", help="Store a memory"
+    )
+    p_remember.add_argument("key", help="Memory key")
+    p_remember.add_argument("content", help="Memory content")
+    p_remember.add_argument(
+        "--category", default="general",
+        help="Category (general, architecture, convention, etc.)",
+    )
+    p_remember.add_argument("--project", default=None)
+    p_remember.set_defaults(func=cmd_remember)
+
+    p_recall = subparsers.add_parser(
+        "recall", help="Recall memories"
+    )
+    p_recall.add_argument("query", help="Search query")
+    p_recall.add_argument("--category", default=None)
+    p_recall.add_argument("--project", default=None)
+    p_recall.set_defaults(func=cmd_recall)
+
+    p_forget = subparsers.add_parser(
+        "forget", help="Delete a memory"
+    )
+    p_forget.add_argument("--id", type=int, default=None)
+    p_forget.add_argument("--key", default=None)
+    p_forget.add_argument("--category", default=None)
+    p_forget.add_argument("--project", default=None)
+    p_forget.set_defaults(func=cmd_forget)
+
+    p_memories = subparsers.add_parser(
+        "memories", help="List all memories"
+    )
+    p_memories.add_argument("--category", default=None)
+    p_memories.add_argument("--project", default=None)
+    p_memories.set_defaults(func=cmd_memories)
 
     p_remove = subparsers.add_parser("remove", help="Remove a project from the index")
     p_remove.add_argument("name", help="Project name (e.g. org/repo)")

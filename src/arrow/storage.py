@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -184,6 +184,43 @@ CREATE TABLE IF NOT EXISTS session_chunks (
     UNIQUE(session_id, chunk_id)
 );
 
+-- Long-term memory: persist knowledge across sessions
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    category TEXT NOT NULL DEFAULT 'general',
+    key TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created REAL,
+    updated REAL,
+    access_count INTEGER DEFAULT 0,
+    UNIQUE(project_id, category, key)
+);
+
+-- FTS index for memory recall
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    key, content, category,
+    content=memories,
+    content_rowid=id
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, key, content, category)
+    VALUES (new.id, new.key, new.content, new.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, key, content, category)
+    VALUES ('delete', old.id, old.key, old.content, old.category);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, key, content, category)
+    VALUES ('delete', old.id, old.key, old.content, old.category);
+    INSERT INTO memories_fts(rowid, key, content, category)
+    VALUES (new.id, new.key, new.content, new.category);
+END;
+
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -242,6 +279,10 @@ class Storage:
         # Migrate v2 -> v3 if needed
         if "projects" in tables and "file_access" not in tables:
             self._migrate_v2_to_v3()
+
+        # Migrate v3 -> v4 if needed
+        if "file_access" in tables and "memories" not in tables:
+            self._migrate_v3_to_v4()
 
     def _migrate_v1_to_v2(self) -> None:
         """Migrate from v1 (single-project) to v2 (multi-project) schema."""
@@ -379,6 +420,75 @@ class Storage:
                 sent_at REAL,
                 UNIQUE(session_id, chunk_id)
             )
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version"
+            " (version) VALUES (?)",
+            (3,)
+        )
+        conn.commit()
+
+    def _migrate_v3_to_v4(self) -> None:
+        """Migrate v3 -> v4: add long-term memory table."""
+        conn = self._conn
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER
+                    REFERENCES projects(id) ON DELETE CASCADE,
+                category TEXT NOT NULL DEFAULT 'general',
+                key TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created REAL,
+                updated REAL,
+                access_count INTEGER DEFAULT 0,
+                UNIQUE(project_id, category, key)
+            )
+        """)
+        conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+            USING fts5(
+                key, content, category,
+                content=memories,
+                content_rowid=id
+            )
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS memories_ai
+            AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(
+                    rowid, key, content, category
+                ) VALUES (
+                    new.id, new.key, new.content, new.category
+                );
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS memories_ad
+            AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(
+                    memories_fts, rowid, key, content, category
+                ) VALUES (
+                    'delete', old.id, old.key,
+                    old.content, old.category
+                );
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS memories_au
+            AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(
+                    memories_fts, rowid, key, content, category
+                ) VALUES (
+                    'delete', old.id, old.key,
+                    old.content, old.category
+                );
+                INSERT INTO memories_fts(
+                    rowid, key, content, category
+                ) VALUES (
+                    new.id, new.key, new.content, new.category
+                );
+            END
         """)
         conn.execute(
             "INSERT OR REPLACE INTO schema_version"
@@ -1048,6 +1158,138 @@ class Storage:
             (session_id,),
         )
         self.conn.commit()
+
+    # -- Long-term memory --
+
+    def store_memory(
+        self, key: str, content: str,
+        category: str = "general",
+        project_id: Optional[int] = None,
+    ) -> int:
+        """Store or update a memory. Returns memory ID."""
+        now = time.time()
+        self.conn.execute(
+            """INSERT INTO memories
+               (project_id, category, key, content,
+                created, updated, access_count)
+               VALUES (?, ?, ?, ?, ?, ?, 0)
+               ON CONFLICT(project_id, category, key) DO UPDATE
+               SET content = excluded.content,
+                   updated = excluded.updated""",
+            (project_id, category, key, content, now, now),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM memories"
+            " WHERE project_id IS ? AND category = ? AND key = ?",
+            (project_id, category, key),
+        ).fetchone()
+        return row["id"] if row else 0
+
+    def recall_memory(
+        self, query: str,
+        category: Optional[str] = None,
+        project_id: Optional[int] = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        """Recall memories by FTS search. Bumps access count."""
+        where = []
+        params: list = []
+        if category:
+            where.append("m.category = ?")
+            params.append(category)
+        if project_id is not None:
+            where.append("m.project_id = ?")
+            params.append(project_id)
+
+        where_sql = (
+            " AND " + " AND ".join(where) if where else ""
+        )
+
+        rows = self.conn.execute(
+            f"""SELECT m.id, m.project_id, m.category,
+                       m.key, m.content, m.created, m.updated,
+                       m.access_count
+                FROM memories_fts fts
+                JOIN memories m ON m.id = fts.rowid
+                WHERE memories_fts MATCH ?{where_sql}
+                ORDER BY rank
+                LIMIT ?""",
+            [query, *params, limit],
+        ).fetchall()
+
+        results = [dict(r) for r in rows]
+        # Bump access count for recalled memories
+        for mem in results:
+            self.conn.execute(
+                "UPDATE memories SET access_count ="
+                " access_count + 1 WHERE id = ?",
+                (mem["id"],),
+            )
+        if results:
+            self.conn.commit()
+        return results
+
+    def list_memories(
+        self, category: Optional[str] = None,
+        project_id: Optional[int] = None,
+    ) -> list[dict]:
+        """List all memories, optionally filtered."""
+        where = []
+        params: list = []
+        if category:
+            where.append("category = ?")
+            params.append(category)
+        if project_id is not None:
+            where.append("project_id = ?")
+            params.append(project_id)
+
+        where_sql = (
+            " WHERE " + " AND ".join(where) if where else ""
+        )
+
+        rows = self.conn.execute(
+            f"""SELECT id, project_id, category, key, content,
+                       created, updated, access_count
+                FROM memories{where_sql}
+                ORDER BY updated DESC""",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_memory(
+        self, memory_id: Optional[int] = None,
+        key: Optional[str] = None,
+        category: Optional[str] = None,
+        project_id: Optional[int] = None,
+    ) -> int:
+        """Delete memory by ID or by key+category. Returns count."""
+        if memory_id is not None:
+            self.conn.execute(
+                "DELETE FROM memories WHERE id = ?",
+                (memory_id,),
+            )
+        elif key is not None:
+            if category:
+                self.conn.execute(
+                    "DELETE FROM memories"
+                    " WHERE key = ? AND category = ?"
+                    " AND project_id IS ?",
+                    (key, category, project_id),
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM memories"
+                    " WHERE key = ? AND project_id IS ?",
+                    (key, project_id),
+                )
+        else:
+            return 0
+        count = self.conn.execute(
+            "SELECT changes()"
+        ).fetchone()[0]
+        self.conn.commit()
+        return count
 
     # -- Stale index detection --
 
