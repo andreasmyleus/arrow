@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import time
 import threading
 import uuid
@@ -1712,6 +1713,16 @@ def _auto_warm_cwd() -> None:
     cwd = Path.cwd()
     if not cwd.is_dir() or not is_git_repo(cwd):
         return
+
+    # Walk up to the git repo root so we index the full repo (including tests)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        cwd = Path(result.stdout.strip())
+    except Exception:
+        pass  # Fall back to cwd if we can't find the root
 
     storage = _get_storage()
     existing = storage.get_project_by_root(str(cwd))
