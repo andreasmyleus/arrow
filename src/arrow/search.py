@@ -82,6 +82,8 @@ class HybridSearcher:
         fts_limit: int = 50,
         vec_limit: int = 50,
         project_id: Optional[int] = None,
+        frecency_boost: bool = False,
+        exclude_chunk_ids: Optional[set[int]] = None,
     ) -> list[SearchResult]:
         """Hybrid search combining BM25 and vector similarity.
 
@@ -140,6 +142,39 @@ class HybridSearcher:
 
         # Reciprocal rank fusion
         fused = reciprocal_rank_fusion(ranked_lists)
+
+        # Filter out already-sent chunks (conversation awareness)
+        if exclude_chunk_ids:
+            fused = [
+                (cid, s) for cid, s in fused
+                if cid not in exclude_chunk_ids
+            ]
+
+        # Apply frecency boost
+        if frecency_boost:
+            frecency = self.storage.get_frecency_scores(
+                project_id=project_id
+            )
+            if frecency:
+                # Pre-fetch chunk->file mapping for boost
+                boost_ids = [cid for cid, _ in fused[:limit * 2]]
+                boost_chunks = {
+                    c.id: c.file_id
+                    for c in self.storage.get_chunks_by_ids(
+                        boost_ids
+                    )
+                }
+                boosted = []
+                for cid, score in fused:
+                    fid = boost_chunks.get(cid)
+                    if fid and fid in frecency:
+                        # Boost: up to 30% increase
+                        boost = min(frecency[fid] * 0.05, 0.3)
+                        score = score * (1.0 + boost)
+                    boosted.append((cid, score))
+                fused = sorted(
+                    boosted, key=lambda x: x[1], reverse=True
+                )
 
         # Batch fetch chunks and files to avoid N+1 queries
         top = fused[:limit]
@@ -229,6 +264,8 @@ class HybridSearcher:
     def get_context(
         self, query: str, token_budget: int = 8000,
         project_id: Optional[int] = None,
+        exclude_chunk_ids: Optional[set[int]] = None,
+        frecency_boost: bool = False,
     ) -> dict:
         """Retrieve the most relevant code fitting within a token budget.
 
@@ -236,8 +273,14 @@ class HybridSearcher:
             query: What to search for.
             token_budget: Max tokens to return.
             project_id: Optional project filter. None = all projects.
+            exclude_chunk_ids: Chunk IDs to skip (already sent).
+            frecency_boost: Boost recently accessed files.
         """
-        results = self.search(query, limit=50, project_id=project_id)
+        results = self.search(
+            query, limit=50, project_id=project_id,
+            exclude_chunk_ids=exclude_chunk_ids,
+            frecency_boost=frecency_boost,
+        )
 
         if not results:
             return {

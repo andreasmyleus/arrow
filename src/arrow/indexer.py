@@ -685,61 +685,181 @@ class Indexer:
 
 
 def _extract_imports(lines: list[str], language: str) -> list[str]:
-    """Extract import/require statements from source lines."""
+    """Extract import/require statements from source lines.
+
+    Returns both module paths and imported symbol names for
+    cross-file resolution across all supported languages.
+    """
     imports = []
+    in_go_import_block = False
+
     for line in lines:
         stripped = line.strip()
+
         if language == "python":
             if stripped.startswith("import "):
-                mod = stripped.split()[1].split(".")[0]
-                imports.append(mod)
+                # import os, sys  /  import os.path
+                for mod in stripped[7:].split(","):
+                    mod = mod.strip().split(" as ")[0]
+                    imports.append(mod.split(".")[0])
+                    if "." in mod:
+                        imports.append(mod)
             elif stripped.startswith("from "):
                 parts = stripped.split()
-                if len(parts) >= 2:
-                    mod = parts[1].split(".")[0]
-                    imports.append(mod)
+                if len(parts) >= 4 and parts[2] == "import":
+                    mod = parts[1]
+                    imports.append(mod.split(".")[0])
+                    if "." in mod:
+                        imports.append(mod)
+                    # Also record imported names
+                    syms = " ".join(parts[3:])
+                    for sym in syms.split(","):
+                        sym = sym.strip().split(" as ")[0]
+                        if sym and sym != "*":
+                            imports.append(sym)
+
         elif language in ("javascript", "typescript", "tsx"):
+            # import { foo, bar } from 'module'
+            # import foo from 'module'
+            # const foo = require('module')
             if "require(" in stripped or "import " in stripped:
+                # Extract module path
                 for q in ('"', "'", "`"):
                     if q in stripped:
                         start = stripped.index(q) + 1
-                        end = stripped.index(q, start) if q in stripped[start:] else -1
-                        if end > start:
-                            imports.append(stripped[start:end])
+                        idx = stripped.find(q, start)
+                        if idx > start:
+                            imports.append(stripped[start:idx])
                         break
+                # Extract named imports: { foo, bar }
+                if "{" in stripped and "}" in stripped:
+                    brace_s = stripped.index("{") + 1
+                    brace_e = stripped.index("}")
+                    names = stripped[brace_s:brace_e]
+                    for name in names.split(","):
+                        name = name.strip().split(" as ")[0]
+                        if name:
+                            imports.append(name)
+                # Default import: import Foo from
+                elif stripped.startswith("import "):
+                    toks = stripped.split()
+                    if len(toks) >= 2 and toks[1] != "*":
+                        name = toks[1].rstrip(",")
+                        if name != "{" and name != "type":
+                            imports.append(name)
+
         elif language == "go":
-            if stripped.startswith('"') and stripped.endswith('"'):
-                imports.append(stripped.strip('"'))
+            if stripped == "import (":
+                in_go_import_block = True
+                continue
+            if in_go_import_block:
+                if stripped == ")":
+                    in_go_import_block = False
+                    continue
+                # Handle aliased: alias "path"
+                clean = stripped.split("//")[0].strip()
+                if '"' in clean:
+                    start = clean.index('"') + 1
+                    end = clean.rindex('"')
+                    if end > start:
+                        path = clean[start:end]
+                        imports.append(path)
+                        # Also add the last segment as symbol
+                        imports.append(path.rsplit("/", 1)[-1])
             elif stripped.startswith("import "):
                 if '"' in stripped:
                     start = stripped.index('"') + 1
                     end = stripped.rindex('"')
                     if end > start:
-                        imports.append(stripped[start:end])
+                        path = stripped[start:end]
+                        imports.append(path)
+                        imports.append(path.rsplit("/", 1)[-1])
+
         elif language == "rust":
             if stripped.startswith("use "):
-                mod = stripped[4:].split("::")[0].rstrip(";").strip()
-                imports.append(mod)
+                full = stripped[4:].rstrip(";").strip()
+                # use crate::module::Symbol
+                parts = full.split("::")
+                imports.append(parts[0])
+                if len(parts) > 1:
+                    imports.append(full)
+                    # Extract {A, B} from use mod::{A, B}
+                    last = parts[-1]
+                    if "{" in last:
+                        names = last.strip("{}").split(",")
+                        for n in names:
+                            n = n.strip()
+                            if n and n != "self":
+                                imports.append(n)
+                    else:
+                        imports.append(last)
+
         elif language == "java":
             if stripped.startswith("import "):
-                mod = stripped[7:].rstrip(";").strip()
-                imports.append(mod)
+                full = stripped[7:].rstrip(";").strip()
+                if full.startswith("static "):
+                    full = full[7:]
+                imports.append(full)
+                # Also add the class name (last segment)
+                parts = full.rsplit(".", 1)
+                if len(parts) == 2 and parts[1] != "*":
+                    imports.append(parts[1])
+
         elif language in ("c", "cpp"):
             if stripped.startswith("#include"):
-                for delim_start, delim_end in [("<", ">"), ('"', '"')]:
-                    if delim_start in stripped:
-                        start = stripped.index(delim_start) + 1
-                        end = stripped.index(delim_end, start)
+                for ds, de in [("<", ">"), ('"', '"')]:
+                    if ds in stripped:
+                        start = stripped.index(ds) + 1
+                        end = stripped.index(de, start)
                         if end > start:
                             imports.append(stripped[start:end])
                         break
+
         elif language == "ruby":
-            if stripped.startswith("require ") or stripped.startswith("require_relative "):
+            if (stripped.startswith("require ")
+                    or stripped.startswith("require_relative ")):
                 for q in ('"', "'"):
                     if q in stripped:
                         start = stripped.index(q) + 1
-                        end = stripped.index(q, start) if q in stripped[start:] else -1
-                        if end > start:
-                            imports.append(stripped[start:end])
+                        idx = stripped.find(q, start)
+                        if idx > start:
+                            imports.append(stripped[start:idx])
                         break
+
+        elif language == "swift":
+            if stripped.startswith("import "):
+                mod = stripped[7:].strip()
+                imports.append(mod)
+
+        elif language == "kotlin":
+            if stripped.startswith("import "):
+                full = stripped[7:].strip()
+                imports.append(full)
+                parts = full.rsplit(".", 1)
+                if len(parts) == 2:
+                    imports.append(parts[1])
+
+        elif language == "scala":
+            if stripped.startswith("import "):
+                full = stripped[7:].strip()
+                imports.append(full)
+
+        elif language == "elixir":
+            for kw in ("import ", "alias ", "use "):
+                if stripped.startswith(kw):
+                    mod = stripped[len(kw):].strip()
+                    mod = mod.split(",")[0].strip()
+                    imports.append(mod)
+                    break
+
+        elif language == "dart":
+            if stripped.startswith("import "):
+                for q in ("'", '"'):
+                    if q in stripped:
+                        start = stripped.index(q) + 1
+                        idx = stripped.find(q, start)
+                        if idx > start:
+                            imports.append(stripped[start:idx])
+                        break
+
     return imports

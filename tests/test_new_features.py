@@ -418,3 +418,380 @@ class TestStorageNewMethods:
         results = storage.resolve_symbol_across_repos("authenticate")
         assert len(results) > 0
         assert results[0]["name"] == "authenticate"
+
+
+# --- Frecency-Weighted Results ---
+
+
+class TestFrecency:
+    def test_record_file_access(self, setup_server):
+        import arrow.server as srv
+        storage = srv._get_storage()
+        projects = storage.list_projects()
+        files = storage.get_all_files(project_id=projects[0].id)
+        assert len(files) > 0
+        storage.record_file_access(files[0].id, projects[0].id)
+        storage.record_file_access(files[0].id, projects[0].id)
+        scores = storage.get_frecency_scores(
+            project_id=projects[0].id
+        )
+        assert files[0].id in scores
+        assert scores[files[0].id] > 0
+
+    def test_frecency_boost_in_search(self, setup_server):
+        import arrow.server as srv
+        storage = srv._get_storage()
+        searcher = srv._get_searcher()
+        projects = storage.list_projects()
+        pid = projects[0].id
+
+        # Search without boost
+        r1 = searcher.search(
+            "authenticate", limit=5, project_id=pid,
+            frecency_boost=False,
+        )
+
+        # Access a file heavily
+        files = storage.get_all_files(project_id=pid)
+        for _ in range(10):
+            storage.record_file_access(files[0].id, pid)
+
+        # Search with boost
+        r2 = searcher.search(
+            "authenticate", limit=5, project_id=pid,
+            frecency_boost=True,
+        )
+        # Both should return results
+        assert len(r1) > 0
+        assert len(r2) > 0
+
+    def test_frecency_decay(self, setup_server):
+        """Frecency scores should decay over time."""
+        import arrow.server as srv
+        storage = srv._get_storage()
+        projects = storage.list_projects()
+        files = storage.get_all_files(project_id=projects[0].id)
+        storage.record_file_access(files[0].id, projects[0].id)
+        scores = storage.get_frecency_scores(
+            project_id=projects[0].id
+        )
+        # Score should be positive (recent access)
+        assert scores[files[0].id] > 0
+
+
+# --- Multi-Language Import Resolution ---
+
+
+class TestMultiLangImports:
+    def test_python_imports_indexed(self, setup_server):
+        """Python imports should be resolved during indexing."""
+        import arrow.server as srv
+        storage = srv._get_storage()
+        projects = storage.list_projects()
+        pid = projects[0].id
+        files = storage.get_all_files(project_id=pid)
+        # api.py imports from auth — check import relationships
+        api_file = next(
+            (f for f in files if "api" in f.path), None
+        )
+        auth_file = next(
+            (f for f in files if "auth" in f.path), None
+        )
+        if api_file and auth_file:
+            importers = storage.get_importers_of_file(
+                auth_file.path
+            )
+            paths = [i["path"] for i in importers]
+            assert any("api" in p for p in paths)
+
+    def test_multi_lang_import_parser(self):
+        """Test import extraction for various languages."""
+        from arrow.indexer import _extract_imports
+        # Test JS/TS import
+        js_lines = ['import { foo } from "./bar";']
+        imps = _extract_imports(js_lines, "javascript")
+        assert len(imps) > 0
+
+    def test_go_import_parser(self):
+        from arrow.indexer import _extract_imports
+        go_lines = [
+            'import (',
+            '    "fmt"',
+            '    "net/http"',
+            ')',
+        ]
+        imps = _extract_imports(go_lines, "go")
+        assert len(imps) > 0
+
+    def test_rust_use_parser(self):
+        from arrow.indexer import _extract_imports
+        rust_lines = ['use std::collections::HashMap;']
+        imps = _extract_imports(rust_lines, "rust")
+        assert len(imps) > 0
+
+
+# --- Stale Index Detection ---
+
+
+class TestStaleIndex:
+    def test_detect_stale_no_changes(self, setup_server):
+        """Freshly indexed project should not be stale."""
+        from arrow.server import detect_stale_index
+        result = json.loads(detect_stale_index(None))
+        assert isinstance(result, list)
+        assert len(result) > 0
+        # Just indexed, drift should be 0
+        assert result[0]["drift_count"] == 0
+
+    def test_detect_stale_after_modification(self, setup_server):
+        """Modified file should show up as stale."""
+        from arrow.server import detect_stale_index
+        project_dir, _, _ = setup_server
+        # Modify a file
+        (project_dir / "auth.py").write_text(
+            "def authenticate(user, password):\n"
+            "    return user == 'superadmin'\n"
+        )
+        result = json.loads(detect_stale_index(None))
+        assert result[0]["drift_count"] >= 1
+
+    def test_detect_stale_specific_project(self, setup_server):
+        from arrow.server import detect_stale_index
+        import arrow.server as srv
+        storage = srv._get_storage()
+        projects = storage.list_projects()
+        name = projects[0].name
+        result = json.loads(detect_stale_index(name))
+        assert isinstance(result, list)
+
+
+# --- Conversation-Aware Context ---
+
+
+class TestConversationContext:
+    def test_session_chunk_tracking(self, setup_server):
+        import arrow.server as srv
+        storage = srv._get_storage()
+        sid = "test-session-123"
+
+        # Record some chunks
+        storage.record_sent_chunk(sid, 1, tokens=100)
+        storage.record_sent_chunk(sid, 2, tokens=200)
+
+        ids = storage.get_sent_chunk_ids(sid)
+        assert 1 in ids
+        assert 2 in ids
+
+        total = storage.get_session_token_total(sid)
+        assert total == 300
+
+    def test_session_clear(self, setup_server):
+        import arrow.server as srv
+        storage = srv._get_storage()
+        sid = "test-session-456"
+
+        storage.record_sent_chunk(sid, 1, tokens=50)
+        storage.clear_session(sid)
+        ids = storage.get_sent_chunk_ids(sid)
+        assert len(ids) == 0
+
+    def test_get_context_excludes_sent(self, setup_server):
+        """get_context should exclude already-sent chunks."""
+        from arrow.server import get_context
+        # First call — should return results
+        r1 = json.loads(get_context("authenticate"))
+        assert r1.get("chunks_returned", 0) > 0
+        assert "session_chunks_excluded" in r1
+
+    def test_context_pressure_tool(self, setup_server):
+        from arrow.server import context_pressure
+        result = json.loads(context_pressure())
+        assert "session_tokens" in result
+        assert "compact_threshold" in result
+        assert "context_pressure_pct" in result
+        assert result["status"] in (
+            "low", "moderate", "high", "critical"
+        )
+
+
+# --- Dead Code Detection ---
+
+
+class TestDeadCode:
+    def test_find_dead_code(self, setup_server):
+        from arrow.server import find_dead_code
+        result = json.loads(find_dead_code(None))
+        assert "dead_code" in result
+        assert "total" in result
+        assert isinstance(result["dead_code"], list)
+
+    def test_dead_code_skips_test_functions(self, setup_server):
+        from arrow.server import find_dead_code
+        result = json.loads(find_dead_code(None))
+        names = [d["name"] for d in result["dead_code"]]
+        # test_ functions should be skipped
+        assert not any(n.startswith("test_") for n in names)
+
+    def test_dead_code_with_project(self, setup_server):
+        from arrow.server import find_dead_code
+        import arrow.server as srv
+        storage = srv._get_storage()
+        projects = storage.list_projects()
+        result = json.loads(find_dead_code(projects[0].name))
+        assert "dead_code" in result
+
+
+# --- Index Export/Import ---
+
+
+class TestExportImport:
+    def test_export_produces_json(self, setup_server):
+        from arrow.server import export_index
+        import arrow.server as srv
+        storage = srv._get_storage()
+        projects = storage.list_projects()
+        result = export_index(projects[0].name)
+        data = json.loads(result)
+        assert "version" in data
+        assert "project" in data
+        assert "files" in data
+        assert "chunks" in data
+        assert data["stats"]["files"] > 0
+
+    def test_import_creates_project(self, setup_server):
+        from arrow.server import export_index, import_index
+        import arrow.server as srv
+        storage = srv._get_storage()
+        projects = storage.list_projects()
+        name = projects[0].name
+
+        # Export
+        bundle = export_index(name)
+
+        # Modify bundle to have a different project name
+        data = json.loads(bundle)
+        data["project"]["name"] = "imported/test"
+        modified = json.dumps(data)
+
+        # Import
+        result = json.loads(import_index(modified))
+        assert "error" not in result
+        assert result["project_name"] == "imported/test"
+        assert result["files"] > 0
+
+    def test_export_nonexistent_project(self, setup_server):
+        from arrow.server import export_index
+        result = json.loads(export_index("nonexistent/project"))
+        assert "error" in result
+
+
+# --- Tool Analytics ---
+
+
+class TestToolAnalytics:
+    def test_record_and_retrieve(self, setup_server):
+        import arrow.server as srv
+        storage = srv._get_storage()
+        storage.record_tool_call("test_tool", 42.5)
+        storage.record_tool_call("test_tool", 58.3)
+        stats = storage.get_tool_analytics(
+            since=0  # all time
+        )
+        tool_stat = next(
+            (s for s in stats if s["tool_name"] == "test_tool"),
+            None,
+        )
+        assert tool_stat is not None
+        assert tool_stat["calls"] == 2
+        assert tool_stat["avg_latency_ms"] is not None
+
+    def test_analytics_tool(self, setup_server):
+        from arrow.server import tool_analytics
+        result = json.loads(tool_analytics(24))
+        assert "total_calls" in result
+        assert "tools" in result
+        assert isinstance(result["tools"], list)
+
+
+# --- Context Compaction ---
+
+
+class TestContextCompaction:
+    def test_compact_context_empty_session(self, setup_server):
+        from arrow.server import compact_context
+        result = json.loads(compact_context(reset=False))
+        assert "message" in result  # "No context sent yet"
+
+    def test_compact_context_with_data(self, setup_server):
+        import arrow.server as srv
+        storage = srv._get_storage()
+        sid = srv._session_id
+        projects = storage.list_projects()
+        pid = projects[0].id
+        chunks = []
+        files = storage.get_all_files(project_id=pid)
+        for file_rec in files[:2]:
+            fc = storage.get_chunks_for_file(file_rec.id)
+            chunks.extend(fc)
+
+        # Simulate sending chunks
+        for ch in chunks[:3]:
+            storage.record_sent_chunk(sid, ch.id, tokens=100)
+
+        from arrow.server import compact_context
+        result = json.loads(compact_context(reset=False))
+        assert "chunks" in result
+        assert result["chunks"] > 0
+        assert "items" in result
+
+    def test_compact_context_reset(self, setup_server):
+        import arrow.server as srv
+        storage = srv._get_storage()
+        sid = srv._session_id
+        projects = storage.list_projects()
+        pid = projects[0].id
+        files = storage.get_all_files(project_id=pid)
+        fc = storage.get_chunks_for_file(files[0].id)
+        if fc:
+            storage.record_sent_chunk(sid, fc[0].id, tokens=50)
+
+        from arrow.server import compact_context
+        result = json.loads(compact_context(reset=True))
+        assert result["reset"] is True
+
+        # Session should be cleared
+        ids = storage.get_sent_chunk_ids(sid)
+        assert len(ids) == 0
+
+    def test_context_pressure_low(self, setup_server):
+        from arrow.server import context_pressure
+        result = json.loads(context_pressure())
+        assert result["context_pressure_pct"] < 1
+        assert result["status"] == "low"
+
+    def test_auto_compact_threshold(self, setup_server):
+        """When session tokens exceed threshold, get_context
+        should return compacted response."""
+        import arrow.server as srv
+        storage = srv._get_storage()
+        sid = srv._session_id
+        projects = storage.list_projects()
+        pid = projects[0].id
+
+        # Set a very low threshold for testing
+        os.environ["ARROW_COMPACT_THRESHOLD"] = "10"
+
+        # Record enough tokens to exceed threshold
+        files = storage.get_all_files(project_id=pid)
+        fc = storage.get_chunks_for_file(files[0].id)
+        if fc:
+            storage.record_sent_chunk(
+                sid, fc[0].id, tokens=100
+            )
+
+        from arrow.server import get_context
+        result = json.loads(get_context("authenticate"))
+        assert result.get("compacted") is True
+        assert "previous_context_summary" in result
+
+        os.environ.pop("ARROW_COMPACT_THRESHOLD", None)

@@ -468,6 +468,130 @@ def cmd_tests_for(args):
         print()
 
 
+def cmd_stale(args):
+    """Check if the index is stale."""
+    _setup_logging("WARNING")
+
+    from .server import detect_stale_index
+    result = json.loads(detect_stale_index(args.project))
+
+    if isinstance(result, dict) and "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    for proj in result:
+        print(f"\n{proj['project']}:")
+        print(f"  Files:  {proj['total_files']}")
+        print(f"  Drift:  {proj['drift_count']} ({proj['drift_pct']}%)")
+        print(f"  Status: {proj['recommendation']}")
+        if proj["stale_files"]:
+            print(f"  Stale:")
+            for f in proj["stale_files"][:10]:
+                print(f"    {f}")
+
+
+def cmd_deadcode(args):
+    """Find dead code (functions with zero callers)."""
+    _setup_logging("WARNING")
+
+    from .server import find_dead_code
+    result = json.loads(find_dead_code(args.project))
+
+    print(f"Dead code: {result['total']} unreferenced functions\n")
+    for item in result["dead_code"]:
+        print(f"  {item['kind']:10s} {item['name']:30s} "
+              f"{item['file']}:{item['lines']}")
+
+
+def cmd_export(args):
+    """Export a project index."""
+    _setup_logging("WARNING")
+
+    from .server import export_index
+    result = export_index(args.project)
+
+    if args.output:
+        Path(args.output).write_text(result)
+        data = json.loads(result)
+        print(f"Exported {data['stats']['files']} files, "
+              f"{data['stats']['chunks']} chunks to {args.output}")
+    else:
+        print(result)
+
+
+def cmd_import(args):
+    """Import a project index."""
+    _setup_logging("WARNING")
+
+    bundle = Path(args.file).read_text()
+    from .server import import_index
+    result = json.loads(import_index(bundle))
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Imported: {result['project_name']}")
+    print(f"  Files:   {result['files']}")
+    print(f"  Chunks:  {result['chunks']}")
+    print(f"  Symbols: {result['symbols']}")
+
+
+def cmd_analytics(args):
+    """Show tool usage analytics."""
+    _setup_logging("WARNING")
+
+    from .server import tool_analytics
+    result = json.loads(tool_analytics(args.hours))
+
+    print(f"Tool analytics (last {result['window_hours']}h):\n")
+    print(f"  Total calls:        {result['total_calls']}")
+    print(f"  Total tokens saved: {result['total_tokens_saved']}\n")
+
+    for tool in result["tools"]:
+        avg = tool["avg_latency_ms"] or 0
+        saved = tool["total_tokens_saved"] or 0
+        print(f"  {tool['tool_name']:25s} "
+              f"{tool['calls']:4d} calls  "
+              f"{avg:6.1f}ms avg  "
+              f"{saved:6d} tokens saved")
+
+
+def cmd_pressure(args):
+    """Show context window pressure."""
+    _setup_logging("WARNING")
+
+    from .server import context_pressure
+    result = json.loads(context_pressure())
+
+    print(f"Context pressure: {result['context_pressure_pct']}%"
+          f" ({result['status']})")
+    print(f"  Session tokens: {result['session_tokens']:,}"
+          f" / {result['compact_threshold']:,}")
+    print(f"  Chunks sent:    {result['chunks_sent']}")
+    print(f"  {result['recommendation']}")
+
+
+def cmd_compact(args):
+    """Compact session context."""
+    _setup_logging("WARNING")
+
+    from .server import compact_context
+    result = json.loads(compact_context(reset=args.reset))
+
+    if "message" in result:
+        print(result["message"])
+        return
+
+    print(f"Compacted {result['chunks']} chunks "
+          f"across {result['files']} files")
+    print(f"  Before: {result['session_tokens_before']:,} tokens")
+    print(f"  After:  {result['compact_tokens']:,} tokens"
+          f" ({result['savings_pct']}% savings)")
+    if args.reset:
+        print("  Session cleared.")
+
+
 def cmd_remove(args):
     """Remove a project from the index."""
     _setup_logging("WARNING")
@@ -623,6 +747,40 @@ def main():
     p_tests.set_defaults(func=cmd_tests_for)
 
     # remove
+    p_stale = subparsers.add_parser("stale", help="Check if index is stale")
+    p_stale.add_argument("--project", default=None, help="Project name")
+    p_stale.set_defaults(func=cmd_stale)
+
+    p_dead = subparsers.add_parser("deadcode", help="Find dead code")
+    p_dead.add_argument("--project", default=None, help="Project name")
+    p_dead.set_defaults(func=cmd_deadcode)
+
+    p_export = subparsers.add_parser("export", help="Export a project index")
+    p_export.add_argument("project", help="Project name")
+    p_export.add_argument("-o", "--output", default=None, help="Output file path")
+    p_export.set_defaults(func=cmd_export)
+
+    p_import = subparsers.add_parser("import", help="Import a project index")
+    p_import.add_argument("file", help="JSON bundle file path")
+    p_import.set_defaults(func=cmd_import)
+
+    p_analytics = subparsers.add_parser("analytics", help="Show tool usage analytics")
+    p_analytics.add_argument("--hours", type=int, default=24, help="Hours to look back")
+    p_analytics.set_defaults(func=cmd_analytics)
+
+    subparsers.add_parser(
+        "pressure", help="Show context window pressure"
+    ).set_defaults(func=cmd_pressure)
+
+    p_compact = subparsers.add_parser(
+        "compact", help="Compact session context"
+    )
+    p_compact.add_argument(
+        "--reset", action="store_true",
+        help="Clear session history after compacting",
+    )
+    p_compact.set_defaults(func=cmd_compact)
+
     p_remove = subparsers.add_parser("remove", help="Remove a project from the index")
     p_remove.add_argument("name", help="Project name (e.g. org/repo)")
     p_remove.set_defaults(func=cmd_remove)

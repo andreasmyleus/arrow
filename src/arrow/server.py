@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import threading
+import uuid
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -144,6 +146,128 @@ def _resolve_project_id(project: str | None) -> int | None:
     storage = _get_storage()
     proj = storage.get_project_by_name(project)
     return proj.id if proj else None
+
+
+# Default compact threshold: 256k tokens
+_COMPACT_THRESHOLD = 256_000
+
+
+def _record_chunk_sent(
+    storage, chunk_info: dict, project_id: int | None,
+) -> None:
+    """Record a sent chunk in the session, looking up its chunk_id."""
+    file_rec = storage.get_file(
+        chunk_info["file"], project_id=project_id
+    )
+    if not file_rec:
+        return
+    # Find matching chunk by file + name + lines
+    chunks = storage.get_chunks_for_file(file_rec.id)
+    lines = chunk_info.get("lines", "")
+    tokens = chunk_info.get("tokens", 0)
+    for ch in chunks:
+        ch_lines = f"{ch.start_line}-{ch.end_line}"
+        if ch.name == chunk_info.get("name") and ch_lines == lines:
+            storage.record_sent_chunk(
+                _session_id, ch.id, tokens=tokens
+            )
+            return
+
+
+def _compact_context_response(
+    storage, query: str, project_id: int | None,
+    session_tokens: int, compact_threshold: int,
+) -> str:
+    """Generate a compacted summary of session context.
+
+    Instead of full source code, returns file paths + function
+    signatures + key structure. This fits far more context into
+    the same token budget.
+    """
+    details = storage.get_session_chunks_detail(_session_id)
+    if not details:
+        return json.dumps({
+            "query": query,
+            "compacted": True,
+            "reason": "session_token_limit",
+            "session_tokens": session_tokens,
+            "compact_threshold": compact_threshold,
+            "chunks": [],
+        })
+
+    # Group by file for compact presentation
+    file_chunks: dict[int, list[dict]] = {}
+    for det in details:
+        fid = det["file_id"]
+        if fid not in file_chunks:
+            file_chunks[fid] = []
+        file_chunks[fid].append(det)
+
+    # Build compact summaries: signature + first/last lines
+    compact_items = []
+    compact_tokens = 0
+    for fid, chunks in file_chunks.items():
+        file_rec = storage.get_file_by_id(fid)
+        if not file_rec:
+            continue
+        for ch in chunks:
+            content = ch.get("content_text", "") or ""
+            # Extract signature (first meaningful line)
+            lines = content.strip().split("\n")
+            sig_lines = []
+            for line in lines[:5]:
+                sig_lines.append(line)
+                if line.rstrip().endswith((
+                    ":", "{", "->", "/**", "*/",
+                )):
+                    break
+            signature = "\n".join(sig_lines)
+            # Estimate: signature ~10% of full tokens
+            est_tokens = max(
+                int(ch.get("tokens_sent", 0) * 0.1), 5
+            )
+            compact_items.append({
+                "file": file_rec.path,
+                "name": ch["name"],
+                "kind": ch["kind"],
+                "lines": f"{ch['start_line']}-{ch['end_line']}",
+                "signature": signature,
+                "original_tokens": ch.get("tokens_sent", 0),
+                "compact_tokens": est_tokens,
+            })
+            compact_tokens += est_tokens
+
+    # Now also run a fresh search for the new query
+    searcher = _get_searcher()
+    sent = storage.get_sent_chunk_ids(_session_id)
+    fresh = searcher.get_context(
+        query, token_budget=4000, project_id=project_id,
+        exclude_chunk_ids=sent, frecency_boost=True,
+    )
+
+    return json.dumps({
+        "query": query,
+        "compacted": True,
+        "reason": "session_token_limit",
+        "session_tokens": session_tokens,
+        "compact_threshold": compact_threshold,
+        "context_pressure_pct": round(
+            session_tokens / compact_threshold * 100, 1
+        ),
+        "previous_context_summary": {
+            "files_referenced": len(file_chunks),
+            "chunks_summarized": len(compact_items),
+            "original_tokens": session_tokens,
+            "compact_tokens": compact_tokens,
+            "items": compact_items,
+        },
+        "fresh_results": fresh,
+        "hint": (
+            "Context pressure is high. Previous results are "
+            "summarized above (signatures only). Use "
+            "compact_context() to reset or review full history."
+        ),
+    }, indent=2)
 
 
 # ─── MCP Tools ──────────────────────────────────────────────────────────
@@ -319,13 +443,56 @@ def get_context(
     searcher = _get_searcher()
 
     # Auto-estimate budget if not specified
-    if token_budget <= 0:
-        token_budget = searcher.estimate_budget(query, project_id=project_id)
+    auto = token_budget <= 0
+    if auto:
+        token_budget = searcher.estimate_budget(
+            query, project_id=project_id
+        )
 
+    # Conversation-aware: exclude already-sent chunks
+    sent = storage.get_sent_chunk_ids(_session_id)
+    session_tokens = storage.get_session_token_total(_session_id)
+
+    # Auto-compact if session exceeds threshold
+    compact_threshold = int(os.environ.get(
+        "ARROW_COMPACT_THRESHOLD", str(_COMPACT_THRESHOLD)
+    ))
+    if session_tokens > compact_threshold:
+        # Return compacted summary instead of full code
+        return _compact_context_response(
+            storage, query, project_id, session_tokens,
+            compact_threshold,
+        )
+
+    t0 = time.time()
     context = searcher.get_context(
-        query, token_budget=token_budget, project_id=project_id
+        query, token_budget=token_budget, project_id=project_id,
+        exclude_chunk_ids=sent, frecency_boost=True,
     )
-    context["budget_mode"] = "auto" if token_budget else "manual"
+    latency = (time.time() - t0) * 1000
+
+    # Track which chunks were sent in this session
+    for chunk in context.get("chunks", []):
+        # Record file access for frecency
+        file_rec = storage.get_file(
+            chunk["file"], project_id=project_id
+        )
+        if file_rec:
+            storage.record_file_access(file_rec.id, project_id)
+        # Record sent chunk with token count
+        _record_chunk_sent(storage, chunk, project_id)
+
+    # Record analytics
+    storage.record_tool_call(
+        "get_context", latency, project_id=project_id
+    )
+
+    context["budget_mode"] = "auto" if auto else "manual"
+    context["session_chunks_excluded"] = len(sent)
+    context["session_tokens_total"] = session_tokens
+    context["compact_threshold"] = compact_threshold
+    pct = round(session_tokens / compact_threshold * 100, 1)
+    context["context_pressure_pct"] = pct
     return json.dumps(context, indent=2)
 
 
@@ -931,6 +1098,448 @@ def get_tests_for(
 
 
 @mcp.tool()
+def detect_stale_index(project: str | None = None) -> str:
+    """Check if the index is stale compared to the working tree.
+
+    Compares indexed file hashes against current disk state to find
+    files that have changed since last indexing.
+
+    Args:
+        project: Project name. Omit to check all local projects.
+
+    Returns:
+        JSON with stale files, drift percentage, and recommendation.
+    """
+    storage = _get_storage()
+    from .hasher import hash_file
+
+    projects = storage.list_projects()
+    if project:
+        proj = storage.get_project_by_name(project)
+        if not proj:
+            return json.dumps({"error": f"Project not found: {project}"})
+        projects = [proj]
+
+    results = []
+    for proj in projects:
+        if not proj.root_path or proj.is_remote:
+            continue
+        root = Path(proj.root_path)
+        if not root.is_dir():
+            continue
+
+        indexed_files = storage.get_all_files(project_id=proj.id)
+        stale = []
+        missing = []
+        for f in indexed_files:
+            full = root / f.path
+            if not full.exists():
+                missing.append(f.path)
+                continue
+            try:
+                current_hash = hash_file(str(full))
+                if current_hash != f.content_hash:
+                    stale.append(f.path)
+            except OSError:
+                continue
+
+        total = len(indexed_files)
+        drift = len(stale) + len(missing)
+        pct = round(drift / total * 100, 1) if total else 0
+
+        results.append({
+            "project": proj.name,
+            "total_files": total,
+            "stale_files": stale[:20],
+            "missing_files": missing[:10],
+            "drift_count": drift,
+            "drift_pct": pct,
+            "last_indexed": proj.last_indexed,
+            "recommendation": (
+                "re-index recommended" if pct > 10
+                else "index is fresh" if pct == 0
+                else "minor drift"
+            ),
+        })
+
+    return json.dumps(results, indent=2)
+
+
+@mcp.tool()
+def find_dead_code(project: str | None = None) -> str:
+    """Find functions and methods with zero callers in the index.
+
+    Scans all symbols and checks if any other code references them.
+    Skips private functions, test helpers, and entry points.
+
+    Args:
+        project: Optional project name. Omit for all projects.
+
+    Returns:
+        JSON list of unreferenced functions with file and line info.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+    dead = storage.find_dead_code(project_id=project_id)
+    return json.dumps({
+        "dead_code": dead[:100],
+        "total": len(dead),
+    }, indent=2)
+
+
+@mcp.tool()
+def export_index(project: str) -> str:
+    """Export a project's index as a portable JSON bundle.
+
+    The export includes all files, chunks, symbols, and imports.
+    Can be imported on another machine to skip re-indexing.
+
+    Args:
+        project: Project name to export (e.g. "org/repo").
+
+    Returns:
+        JSON bundle with all index data for the project.
+    """
+    storage = _get_storage()
+    proj = storage.get_project_by_name(project)
+    if not proj:
+        return json.dumps({"error": f"Project not found: {project}"})
+
+    files = storage.get_all_files(project_id=proj.id)
+    all_chunks = []
+    all_symbols = []
+    all_imports = []
+
+    for f in files:
+        chunks = storage.get_chunks_for_file(f.id)
+        for c in chunks:
+            all_chunks.append({
+                "file_path": f.path,
+                "name": c.name,
+                "kind": c.kind,
+                "start_line": c.start_line,
+                "end_line": c.end_line,
+                "content_text": c.content_text or "",
+                "scope_context": c.scope_context,
+                "token_count": c.token_count,
+            })
+
+        # Symbols for this file
+        syms = storage.conn.execute(
+            "SELECT name, kind FROM symbols WHERE file_id = ?",
+            (f.id,),
+        ).fetchall()
+        for s in syms:
+            all_symbols.append({
+                "file_path": f.path,
+                "name": s["name"],
+                "kind": s["kind"],
+            })
+
+        # Imports for this file
+        imps = storage.conn.execute(
+            "SELECT symbol FROM imports WHERE source_file = ?",
+            (f.id,),
+        ).fetchall()
+        for imp in imps:
+            all_imports.append({
+                "file_path": f.path,
+                "symbol": imp["symbol"],
+            })
+
+    bundle = {
+        "version": 1,
+        "project": {
+            "name": proj.name,
+            "remote_url": proj.remote_url,
+            "git_branch": proj.git_branch,
+            "git_commit": proj.git_commit,
+        },
+        "files": [
+            {"path": f.path, "language": f.language,
+             "content_hash": f.content_hash}
+            for f in files
+        ],
+        "chunks": all_chunks,
+        "symbols": all_symbols,
+        "imports": all_imports,
+        "stats": {
+            "files": len(files),
+            "chunks": len(all_chunks),
+            "symbols": len(all_symbols),
+            "imports": len(all_imports),
+        },
+    }
+
+    return json.dumps(bundle)
+
+
+@mcp.tool()
+def import_index(bundle_json: str) -> str:
+    """Import a project index from an exported JSON bundle.
+
+    Recreates the project, files, chunks, symbols, and imports
+    from a previously exported bundle. Skips re-indexing.
+
+    Args:
+        bundle_json: The JSON string from export_index.
+
+    Returns:
+        JSON status with counts.
+    """
+    try:
+        bundle = json.loads(bundle_json)
+    except json.JSONDecodeError:
+        return json.dumps({"error": "Invalid JSON bundle"})
+
+    if "project" not in bundle or "chunks" not in bundle:
+        return json.dumps({"error": "Invalid bundle format"})
+
+    storage = _get_storage()
+    from .chunker import compress_content
+
+    proj_data = bundle["project"]
+    project_id = storage.create_project(
+        name=proj_data["name"],
+        remote_url=proj_data.get("remote_url"),
+        git_branch=proj_data.get("git_branch"),
+        git_commit=proj_data.get("git_commit"),
+    )
+
+    # Create files
+    file_id_map = {}
+    for f in bundle.get("files", []):
+        fid = storage.upsert_file(
+            f["path"], f["content_hash"],
+            f.get("language"), project_id=project_id,
+        )
+        file_id_map[f["path"]] = fid
+
+    # Create chunks
+    chunks_created = 0
+    for c in bundle.get("chunks", []):
+        fid = file_id_map.get(c["file_path"])
+        if not fid:
+            continue
+        compressed = compress_content(c["content_text"])
+        storage.insert_chunk(
+            file_id=fid,
+            name=c["name"],
+            kind=c["kind"],
+            start_line=c["start_line"],
+            end_line=c["end_line"],
+            content=compressed,
+            content_text=c["content_text"],
+            scope_context=c.get("scope_context", ""),
+            token_count=c.get("token_count", 0),
+            project_id=project_id,
+        )
+        chunks_created += 1
+
+    # Create symbols
+    symbols_created = 0
+    for s in bundle.get("symbols", []):
+        fid = file_id_map.get(s["file_path"])
+        if not fid:
+            continue
+        file_chunks = storage.get_chunks_for_file(fid)
+        if file_chunks:
+            storage.insert_symbol(
+                chunk_id=file_chunks[0].id,
+                name=s["name"],
+                kind=s["kind"],
+                file_id=fid,
+            )
+            symbols_created += 1
+
+    # Create imports
+    imports_created = 0
+    for imp in bundle.get("imports", []):
+        fid = file_id_map.get(imp["file_path"])
+        if fid:
+            storage.conn.execute(
+                "INSERT INTO imports (source_file, target_file, symbol)"
+                " VALUES (?, NULL, ?)",
+                (fid, imp["symbol"]),
+            )
+            imports_created += 1
+
+    storage.commit()
+
+    elapsed = "0s"
+    storage.update_project_indexed(
+        project_id, elapsed,
+        json.dumps({}),
+    )
+
+    return json.dumps({
+        "project_name": proj_data["name"],
+        "project_id": project_id,
+        "files": len(file_id_map),
+        "chunks": chunks_created,
+        "symbols": symbols_created,
+        "imports": imports_created,
+        "status": "imported",
+    }, indent=2)
+
+
+@mcp.tool()
+def tool_analytics(hours: int = 24) -> str:
+    """Get usage analytics for Arrow MCP tools.
+
+    Shows call counts, average latency, and total tokens saved
+    per tool over the specified time window.
+
+    Args:
+        hours: Look-back window in hours (default 24).
+
+    Returns:
+        JSON with per-tool stats and totals.
+    """
+    storage = _get_storage()
+    since = time.time() - (hours * 3600)
+    stats = storage.get_tool_analytics(since=since)
+
+    total_calls = sum(s["calls"] for s in stats)
+    total_saved = sum(s["total_tokens_saved"] or 0 for s in stats)
+
+    return json.dumps({
+        "window_hours": hours,
+        "tools": stats,
+        "total_calls": total_calls,
+        "total_tokens_saved": total_saved,
+    }, indent=2)
+
+
+# Session ID for conversation-aware context tracking
+_session_id: str = str(uuid.uuid4())
+
+
+@mcp.tool()
+def context_pressure() -> str:
+    """Check current context window pressure.
+
+    Shows how many tokens have been sent this session, the
+    compact threshold, and a percentage. Use this to decide
+    whether to call compact_context().
+
+    Returns:
+        JSON with session token stats and pressure percentage.
+    """
+    storage = _get_storage()
+    session_tokens = storage.get_session_token_total(_session_id)
+    sent_ids = storage.get_sent_chunk_ids(_session_id)
+    threshold = int(os.environ.get(
+        "ARROW_COMPACT_THRESHOLD", str(_COMPACT_THRESHOLD)
+    ))
+    pct = round(session_tokens / threshold * 100, 1)
+
+    return json.dumps({
+        "session_id": _session_id,
+        "session_tokens": session_tokens,
+        "compact_threshold": threshold,
+        "context_pressure_pct": pct,
+        "chunks_sent": len(sent_ids),
+        "status": (
+            "critical" if pct > 90
+            else "high" if pct > 70
+            else "moderate" if pct > 40
+            else "low"
+        ),
+        "recommendation": (
+            "Call compact_context() to free space"
+            if pct > 70
+            else "Context budget is healthy"
+        ),
+    }, indent=2)
+
+
+@mcp.tool()
+def compact_context(
+    reset: bool = False,
+) -> str:
+    """Get a compacted summary of all context sent this session.
+
+    Returns signatures and metadata for all previously-sent code
+    chunks, dramatically reducing token usage. Optionally resets
+    the session to start fresh.
+
+    Args:
+        reset: If True, clear session history after compacting.
+
+    Returns:
+        JSON with compacted context summary.
+    """
+    storage = _get_storage()
+    session_tokens = storage.get_session_token_total(_session_id)
+    details = storage.get_session_chunks_detail(_session_id)
+
+    if not details:
+        return json.dumps({
+            "session_tokens": 0,
+            "chunks": 0,
+            "message": "No context sent yet in this session.",
+        })
+
+    # Group by file
+    file_chunks: dict[int, list[dict]] = {}
+    for det in details:
+        fid = det["file_id"]
+        if fid not in file_chunks:
+            file_chunks[fid] = []
+        file_chunks[fid].append(det)
+
+    compact_items = []
+    compact_tokens = 0
+    for fid, chunks in file_chunks.items():
+        file_rec = storage.get_file_by_id(fid)
+        if not file_rec:
+            continue
+        for chunk in chunks:
+            content = chunk.get("content_text", "") or ""
+            lines = content.strip().split("\n")
+            sig_lines = []
+            for line in lines[:5]:
+                sig_lines.append(line)
+                if line.rstrip().endswith((":", "{", "->")):
+                    break
+            signature = "\n".join(sig_lines)
+            est = max(int(chunk.get("tokens_sent", 0) * 0.1), 5)
+            compact_items.append({
+                "file": file_rec.path,
+                "name": chunk["name"],
+                "kind": chunk["kind"],
+                "lines": (
+                    f"{chunk['start_line']}-{chunk['end_line']}"
+                ),
+                "signature": signature,
+                "original_tokens": chunk.get("tokens_sent", 0),
+            })
+            compact_tokens += est
+
+    if reset:
+        storage.clear_session(_session_id)
+
+    return json.dumps({
+        "session_tokens_before": session_tokens,
+        "compact_tokens": compact_tokens,
+        "savings_pct": round(
+            (1 - compact_tokens / max(session_tokens, 1)) * 100,
+            1,
+        ),
+        "files": len(file_chunks),
+        "chunks": len(compact_items),
+        "reset": reset,
+        "items": compact_items,
+        "hint": (
+            "Session cleared — future queries return full code."
+            if reset
+            else "Use compact_context(reset=True) to clear."
+        ),
+    }, indent=2)
+
+
+@mcp.tool()
 def remove_project(project: str) -> str:
     """Remove a project and all its indexed data.
 
@@ -978,7 +1587,6 @@ def _auto_warm_cwd() -> None:
 
     # If already indexed recently (within last 5 min), skip
     if existing and existing.last_indexed:
-        import time
         if time.time() - existing.last_indexed < 300:
             return
 

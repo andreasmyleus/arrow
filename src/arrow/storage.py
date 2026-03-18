@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -156,6 +156,34 @@ CREATE TABLE IF NOT EXISTS imports (
     symbol TEXT
 );
 
+-- Frecency: track file access for ranking boosts
+CREATE TABLE IF NOT EXISTS file_access (
+    file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    access_count INTEGER DEFAULT 1,
+    last_accessed REAL,
+    UNIQUE(file_id)
+);
+
+-- Tool usage analytics
+CREATE TABLE IF NOT EXISTS tool_analytics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_name TEXT NOT NULL,
+    project_id INTEGER,
+    latency_ms REAL,
+    tokens_saved INTEGER DEFAULT 0,
+    timestamp REAL
+);
+
+-- Conversation context: track which chunks were sent
+CREATE TABLE IF NOT EXISTS session_chunks (
+    session_id TEXT NOT NULL,
+    chunk_id INTEGER REFERENCES chunks(id) ON DELETE CASCADE,
+    tokens_sent INTEGER DEFAULT 0,
+    sent_at REAL,
+    UNIQUE(session_id, chunk_id)
+);
+
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
@@ -204,14 +232,16 @@ class Storage:
         if "project" in tables and "projects" not in tables:
             self._migrate_v1_to_v2()
         elif "projects" not in tables:
-            # Fresh database — create v2 schema directly
             self._conn.executescript(SCHEMA_V2_SQL)
             self._conn.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,)
             )
             self._conn.commit()
-        # else: already v2, nothing to do
+
+        # Migrate v2 -> v3 if needed
+        if "projects" in tables and "file_access" not in tables:
+            self._migrate_v2_to_v3()
 
     def _migrate_v1_to_v2(self) -> None:
         """Migrate from v1 (single-project) to v2 (multi-project) schema."""
@@ -313,6 +343,46 @@ class Storage:
         # Set schema version
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+            (SCHEMA_VERSION,)
+        )
+        conn.commit()
+
+    def _migrate_v2_to_v3(self) -> None:
+        """Migrate v2 -> v3: add frecency, analytics, session tables."""
+        conn = self._conn
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS file_access (
+                file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+                project_id INTEGER
+                    REFERENCES projects(id) ON DELETE CASCADE,
+                access_count INTEGER DEFAULT 1,
+                last_accessed REAL,
+                UNIQUE(file_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tool_analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT NOT NULL,
+                project_id INTEGER,
+                latency_ms REAL,
+                tokens_saved INTEGER DEFAULT 0,
+                timestamp REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_chunks (
+                session_id TEXT NOT NULL,
+                chunk_id INTEGER
+                    REFERENCES chunks(id) ON DELETE CASCADE,
+                tokens_sent INTEGER DEFAULT 0,
+                sent_at REAL,
+                UNIQUE(session_id, chunk_id)
+            )
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version"
+            " (version) VALUES (?)",
             (SCHEMA_VERSION,)
         )
         conn.commit()
@@ -827,6 +897,234 @@ class Storage:
             return row[0] if row else 0
         except Exception:
             return 0
+
+    # -- Frecency tracking --
+
+    def record_file_access(
+        self, file_id: int, project_id: Optional[int] = None
+    ) -> None:
+        """Record that a file was accessed (for frecency ranking)."""
+        now = time.time()
+        self.conn.execute(
+            """INSERT INTO file_access
+               (file_id, project_id, access_count, last_accessed)
+               VALUES (?, ?, 1, ?)
+               ON CONFLICT(file_id) DO UPDATE SET
+                   access_count = access_count + 1,
+                   last_accessed = ?""",
+            (file_id, project_id, now, now),
+        )
+        self.conn.commit()
+
+    def get_frecency_scores(
+        self, project_id: Optional[int] = None
+    ) -> dict[int, float]:
+        """Get frecency scores for files. Higher = more relevant.
+
+        Score = access_count * recency_decay where decay halves
+        every 24 hours.
+        """
+        now = time.time()
+        if project_id is not None:
+            rows = self.conn.execute(
+                """SELECT file_id, access_count, last_accessed
+                   FROM file_access WHERE project_id = ?""",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT file_id, access_count, last_accessed"
+                " FROM file_access"
+            ).fetchall()
+
+        scores = {}
+        for row in rows:
+            age_hours = (now - row["last_accessed"]) / 3600
+            decay = 0.5 ** (age_hours / 24)
+            scores[row["file_id"]] = row["access_count"] * decay
+        return scores
+
+    # -- Tool analytics --
+
+    def record_tool_call(
+        self,
+        tool_name: str,
+        latency_ms: float,
+        tokens_saved: int = 0,
+        project_id: Optional[int] = None,
+    ) -> None:
+        """Record a tool invocation for analytics."""
+        self.conn.execute(
+            """INSERT INTO tool_analytics
+               (tool_name, project_id, latency_ms,
+                tokens_saved, timestamp)
+               VALUES (?, ?, ?, ?, ?)""",
+            (tool_name, project_id, latency_ms,
+             tokens_saved, time.time()),
+        )
+        self.conn.commit()
+
+    def get_tool_analytics(
+        self, since: Optional[float] = None
+    ) -> list[dict]:
+        """Get aggregated tool usage analytics."""
+        if since:
+            rows = self.conn.execute(
+                """SELECT tool_name,
+                          COUNT(*) as calls,
+                          AVG(latency_ms) as avg_latency_ms,
+                          SUM(tokens_saved) as total_tokens_saved
+                   FROM tool_analytics
+                   WHERE timestamp >= ?
+                   GROUP BY tool_name
+                   ORDER BY calls DESC""",
+                (since,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT tool_name,
+                          COUNT(*) as calls,
+                          AVG(latency_ms) as avg_latency_ms,
+                          SUM(tokens_saved) as total_tokens_saved
+                   FROM tool_analytics
+                   GROUP BY tool_name
+                   ORDER BY calls DESC"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- Session / conversation context --
+
+    def record_sent_chunk(
+        self, session_id: str, chunk_id: int,
+        tokens: int = 0,
+    ) -> None:
+        """Record that a chunk was sent to Claude in a session."""
+        self.conn.execute(
+            """INSERT OR IGNORE INTO session_chunks
+               (session_id, chunk_id, tokens_sent, sent_at)
+               VALUES (?, ?, ?, ?)""",
+            (session_id, chunk_id, tokens, time.time()),
+        )
+        self.conn.commit()
+
+    def get_sent_chunk_ids(self, session_id: str) -> set[int]:
+        """Get chunk IDs already sent in this session."""
+        rows = self.conn.execute(
+            "SELECT chunk_id FROM session_chunks"
+            " WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        return {r["chunk_id"] for r in rows}
+
+    def get_session_token_total(self, session_id: str) -> int:
+        """Get total tokens sent in this session."""
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(tokens_sent), 0) as total"
+            " FROM session_chunks WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return row["total"] if row else 0
+
+    def get_session_chunks_detail(
+        self, session_id: str
+    ) -> list[dict]:
+        """Get all sent chunks with their details for compaction."""
+        rows = self.conn.execute(
+            """SELECT sc.chunk_id, sc.tokens_sent, sc.sent_at,
+                      c.name, c.kind, c.start_line, c.end_line,
+                      c.file_id, c.content_text, c.project_id
+               FROM session_chunks sc
+               JOIN chunks c ON c.id = sc.chunk_id
+               WHERE sc.session_id = ?
+               ORDER BY sc.sent_at""",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_session(self, session_id: str) -> None:
+        """Clear session context (e.g. on conversation reset)."""
+        self.conn.execute(
+            "DELETE FROM session_chunks WHERE session_id = ?",
+            (session_id,),
+        )
+        self.conn.commit()
+
+    # -- Stale index detection --
+
+    def get_index_staleness(
+        self, project_id: int
+    ) -> Optional[dict]:
+        """Check how stale the index is vs the working tree."""
+        project = self.get_project(project_id)
+        if not project or not project.root_path:
+            return None
+
+        root = Path(project.root_path)
+        if not root.is_dir():
+            return None
+
+        indexed_files = {
+            f.path: f.content_hash
+            for f in self.get_all_files(project_id=project_id)
+        }
+        return {
+            "project": project.name,
+            "indexed_files": len(indexed_files),
+            "last_indexed": project.last_indexed,
+        }
+
+    # -- Dead code detection --
+
+    def find_dead_code(
+        self, project_id: Optional[int] = None
+    ) -> list[dict]:
+        """Find functions/methods with zero callers in the index."""
+        if project_id is not None:
+            symbols = self.conn.execute(
+                """SELECT s.name, s.kind, f.path, s.chunk_id
+                   FROM symbols s
+                   JOIN files f ON f.id = s.file_id
+                   WHERE f.project_id = ?
+                   AND s.kind IN ('function', 'method')""",
+                (project_id,),
+            ).fetchall()
+        else:
+            symbols = self.conn.execute(
+                """SELECT s.name, s.kind, f.path, s.chunk_id
+                   FROM symbols s
+                   JOIN files f ON f.id = s.file_id
+                   WHERE s.kind IN ('function', 'method')"""
+            ).fetchall()
+
+        dead = []
+        for sym in symbols:
+            name = sym["name"]
+            # Skip private/dunder/test/main
+            if (name.startswith("_")
+                    or name.startswith("test")
+                    or name in ("main", "setup", "teardown")):
+                continue
+
+            # Check if any other chunk references this name
+            count = self.conn.execute(
+                """SELECT COUNT(*) FROM chunks
+                   WHERE content_text LIKE ?
+                   AND id != ?""",
+                (f"%{name}%", sym["chunk_id"]),
+            ).fetchone()[0]
+
+            if count == 0:
+                chunk = self.get_chunk_by_id(sym["chunk_id"])
+                dead.append({
+                    "name": name,
+                    "kind": sym["kind"],
+                    "file": sym["path"],
+                    "lines": (
+                        f"{chunk.start_line}-{chunk.end_line}"
+                        if chunk else "?"
+                    ),
+                })
+        return dead
 
     def commit(self) -> None:
         self.conn.commit()
