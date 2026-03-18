@@ -896,12 +896,13 @@ def what_breaks_if_i_change(
     test_file_ids = [tf.id for tf in test_files]
 
     affected_tests = []
+    seen_tests = set()
     for sym in target_symbols:
         test_refs = storage.find_chunks_referencing(sym, test_file_ids)
         for ref in test_refs:
             test_key = (ref["file_path"], ref["name"])
-            if test_key not in seen:
-                seen.add(test_key)
+            if test_key not in seen_tests:
+                seen_tests.add(test_key)
                 affected_tests.append({
                     "file": ref["file_path"],
                     "test_name": ref["name"],

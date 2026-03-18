@@ -608,6 +608,19 @@ class Storage:
             row = self.conn.execute(
                 "SELECT * FROM files WHERE path = ?", (path,)
             ).fetchone()
+        # Fallback: suffix match (e.g. "storage.py" matches "src/arrow/storage.py")
+        if row is None:
+            suffix_pattern = f"%/{path}"
+            if project_id is not None:
+                row = self.conn.execute(
+                    "SELECT * FROM files WHERE path LIKE ? AND project_id = ?",
+                    (suffix_pattern, project_id),
+                ).fetchone()
+            else:
+                row = self.conn.execute(
+                    "SELECT * FROM files WHERE path LIKE ?",
+                    (suffix_pattern,),
+                ).fetchone()
         if row is None:
             return None
         return FileRecord(**dict(row))
