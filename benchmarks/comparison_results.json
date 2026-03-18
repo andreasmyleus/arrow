@@ -1,1001 +1,1012 @@
 {
   "target": "/Users/andreas/workspace/arrow/src/arrow",
   "total_queries": 110,
-  "grand_arrow_tokens": 360071,
-  "grand_trad_tokens": 3341190,
-  "grand_savings_pct": 89.22327075084027,
-  "arrow_total_time_ms": 61.83274870272726,
-  "arrow_avg_time_ms": 0.5621158972975205,
-  "trad_total_time_ms": 68.10249097179621,
-  "trad_avg_time_ms": 0.6191135542890566,
+  "grand_arrow_tokens": 370585,
+  "grand_trad_tokens": 5629539,
+  "grand_savings_pct": 93.41713415610052,
+  "token_efficiency_ratio": 15.2,
+  "avg_arrow_tokens_per_query": 3369,
+  "avg_trad_tokens_per_query": 51178,
+  "savings_range_pct": [
+    -6.2,
+    100.0
+  ],
+  "median_savings_pct": 91.5,
+  "arrow_latency_p50_ms": 0.95,
+  "arrow_latency_p95_ms": 1.43,
+  "arrow_latency_p99_ms": 1.99,
+  "arrow_total_time_ms": 91.82162943761796,
+  "arrow_avg_time_ms": 0.8347420857965269,
+  "trad_total_time_ms": 105.98874662537128,
+  "trad_avg_time_ms": 0.963534060230648,
   "tiers": [
     {
       "tier": "Symbol lookup",
       "queries": 15,
-      "arrow_tokens": 45857,
-      "trad_tokens": 289543,
-      "arrow_time_ms": 5.869664950296283,
-      "trad_time_ms": 5.422911723144352,
-      "savings_pct": 84.162283322339,
+      "arrow_tokens": 46413,
+      "trad_tokens": 507639,
+      "arrow_time_ms": 7.972792140208185,
+      "trad_time_ms": 8.406959008425474,
+      "savings_pct": 90.85708544851755,
       "details": [
         {
           "query": "hash_content function",
-          "arrow_tokens": 3966,
-          "trad_tokens": 22462,
-          "arrow_time_ms": 0.43954094871878624,
-          "trad_time_ms": 0.35779201425611973,
-          "savings_pct": 82.34351348944885
+          "arrow_tokens": 3990,
+          "trad_tokens": 40046,
+          "arrow_time_ms": 0.5971250357106328,
+          "trad_time_ms": 0.5733339348807931,
+          "savings_pct": 90.0364580732158
         },
         {
           "query": "hash_file function",
-          "arrow_tokens": 3990,
-          "trad_tokens": 22462,
-          "arrow_time_ms": 0.35091605968773365,
-          "trad_time_ms": 0.30395796056836843,
-          "savings_pct": 82.23666636986911
+          "arrow_tokens": 3923,
+          "trad_tokens": 40046,
+          "arrow_time_ms": 0.5034999921917915,
+          "trad_time_ms": 0.5135419778525829,
+          "savings_pct": 90.20376566948009
         },
         {
           "query": "count_tokens function",
-          "arrow_tokens": 3995,
-          "trad_tokens": 24117,
-          "arrow_time_ms": 0.3612919244915247,
-          "trad_time_ms": 0.3156659658998251,
-          "savings_pct": 83.43492142472115
+          "arrow_tokens": 3895,
+          "trad_tokens": 42260,
+          "arrow_time_ms": 0.529541983269155,
+          "trad_time_ms": 0.5263750208541751,
+          "savings_pct": 90.78324656885944
         },
         {
           "query": "decompress_content function",
-          "arrow_tokens": 3985,
-          "trad_tokens": 18933,
-          "arrow_time_ms": 0.3232080489397049,
-          "trad_time_ms": 0.2825409173965454,
-          "savings_pct": 78.95209422701103
+          "arrow_tokens": 3989,
+          "trad_tokens": 36252,
+          "arrow_time_ms": 0.48741698265075684,
+          "trad_time_ms": 0.47912506852298975,
+          "savings_pct": 88.99646916032219
         },
         {
           "query": "compress_content function",
-          "arrow_tokens": 3995,
-          "trad_tokens": 22302,
-          "arrow_time_ms": 0.2987500047311187,
-          "trad_time_ms": 0.2899579703807831,
-          "savings_pct": 82.0868083579948
+          "arrow_tokens": 3999,
+          "trad_tokens": 39886,
+          "arrow_time_ms": 0.47158298548310995,
+          "trad_time_ms": 0.5489171016961336,
+          "savings_pct": 89.9739256882114
         },
         {
           "query": "detect_language function",
-          "arrow_tokens": 3993,
-          "trad_tokens": 22302,
-          "arrow_time_ms": 0.3052500542253256,
-          "trad_time_ms": 0.29916700441390276,
-          "savings_pct": 82.09577616357278
+          "arrow_tokens": 3998,
+          "trad_tokens": 39886,
+          "arrow_time_ms": 0.4715000977739692,
+          "trad_time_ms": 0.48649997916072607,
+          "savings_pct": 89.97643283357569
         },
         {
           "query": "SearchResult class",
-          "arrow_tokens": 3965,
-          "trad_tokens": 26874,
-          "arrow_time_ms": 0.5004160339012742,
-          "trad_time_ms": 0.43595791794359684,
-          "savings_pct": 85.24596264047034
+          "arrow_tokens": 3995,
+          "trad_tokens": 45017,
+          "arrow_time_ms": 0.528458971530199,
+          "trad_time_ms": 0.5155419930815697,
+          "savings_pct": 91.12557478285981
         },
         {
           "query": "FileRecord dataclass",
-          "arrow_tokens": 393,
-          "trad_tokens": 5195,
-          "arrow_time_ms": 0.2216249704360962,
-          "trad_time_ms": 0.1382920891046524,
-          "savings_pct": 92.43503368623676
+          "arrow_tokens": 602,
+          "trad_tokens": 10451,
+          "arrow_time_ms": 0.25470799300819635,
+          "trad_time_ms": 0.2252080012112856,
+          "savings_pct": 94.2397856664434
         },
         {
           "query": "ChunkRecord dataclass",
           "arrow_tokens": 450,
-          "trad_tokens": 7010,
-          "arrow_time_ms": 0.23066694848239422,
-          "trad_time_ms": 0.19754096865653992,
-          "savings_pct": 93.58059914407988
+          "trad_tokens": 12825,
+          "arrow_time_ms": 0.22441602777689695,
+          "trad_time_ms": 0.2275829901918769,
+          "savings_pct": 96.49122807017544
         },
         {
           "query": "SymbolRecord dataclass",
           "arrow_tokens": 387,
-          "trad_tokens": 5195,
-          "arrow_time_ms": 0.17666700296103954,
-          "trad_time_ms": 0.1325829653069377,
-          "savings_pct": 92.55052935514918
+          "trad_tokens": 10451,
+          "arrow_time_ms": 0.21554098930209875,
+          "trad_time_ms": 0.1992079196497798,
+          "savings_pct": 96.29700507128504
         },
         {
           "query": "ImportRecord dataclass",
-          "arrow_tokens": 769,
-          "trad_tokens": 5195,
-          "arrow_time_ms": 0.12445799075067043,
-          "trad_time_ms": 0.10629103053361177,
-          "savings_pct": 85.1973051010587
+          "arrow_tokens": 1254,
+          "trad_tokens": 10451,
+          "arrow_time_ms": 0.18954207189381123,
+          "trad_time_ms": 0.1804589992389083,
+          "savings_pct": 88.00114821548178
         },
         {
           "query": "Storage class",
-          "arrow_tokens": 3983,
-          "trad_tokens": 26874,
-          "arrow_time_ms": 0.8032079786062241,
-          "trad_time_ms": 1.0389579692855477,
-          "savings_pct": 85.17898340403363
+          "arrow_tokens": 3954,
+          "trad_tokens": 45017,
+          "arrow_time_ms": 0.8349170675501227,
+          "trad_time_ms": 1.9540420034900308,
+          "savings_pct": 91.21665148721594
         },
         {
           "query": "VectorStore class",
-          "arrow_tokens": 3994,
-          "trad_tokens": 26874,
-          "arrow_time_ms": 0.45541697181761265,
-          "trad_time_ms": 0.39362499956041574,
-          "savings_pct": 85.13805164843343
+          "arrow_tokens": 3995,
+          "trad_tokens": 45017,
+          "arrow_time_ms": 0.6173750152811408,
+          "trad_time_ms": 0.7090829312801361,
+          "savings_pct": 91.12557478285981
         },
         {
           "query": "HybridSearcher class",
-          "arrow_tokens": 3996,
-          "trad_tokens": 26874,
-          "arrow_time_ms": 0.48383395187556744,
-          "trad_time_ms": 0.5192909156903625,
-          "savings_pct": 85.13060951105157
+          "arrow_tokens": 3989,
+          "trad_tokens": 45017,
+          "arrow_time_ms": 1.2901249574497342,
+          "trad_time_ms": 0.5475000943988562,
+          "savings_pct": 91.13890308105826
         },
         {
           "query": "Indexer class",
-          "arrow_tokens": 3996,
-          "trad_tokens": 26874,
-          "arrow_time_ms": 0.7944160606712103,
-          "trad_time_ms": 0.6112910341471434,
-          "savings_pct": 85.13060951105157
+          "arrow_tokens": 3993,
+          "trad_tokens": 45017,
+          "arrow_time_ms": 0.7570419693365693,
+          "trad_time_ms": 0.7205409929156303,
+          "savings_pct": 91.13001754892596
         }
       ]
     },
     {
       "tier": "Method lookup",
       "queries": 15,
-      "arrow_tokens": 36717,
-      "trad_tokens": 199929,
-      "arrow_time_ms": 3.47500026691705,
-      "trad_time_ms": 3.175041754730046,
-      "savings_pct": 81.63498041804841,
+      "arrow_tokens": 41409,
+      "trad_tokens": 362634,
+      "arrow_time_ms": 10.056709521450102,
+      "trad_time_ms": 9.121124283410609,
+      "savings_pct": 88.58104866063303,
       "details": [
         {
           "query": "upsert_file method",
-          "arrow_tokens": 3993,
-          "trad_tokens": 22302,
-          "arrow_time_ms": 0.35008403938263655,
-          "trad_time_ms": 0.3149169497191906,
-          "savings_pct": 82.09577616357278
+          "arrow_tokens": 3995,
+          "trad_tokens": 39886,
+          "arrow_time_ms": 0.5061250412836671,
+          "trad_time_ms": 0.48325001262128353,
+          "savings_pct": 89.98395426966856
         },
         {
           "query": "insert_chunks_batch",
           "arrow_tokens": 2772,
-          "trad_tokens": 10379,
-          "arrow_time_ms": 0.20074995700269938,
-          "trad_time_ms": 0.18045795150101185,
-          "savings_pct": 73.292224684459
+          "trad_tokens": 16459,
+          "arrow_time_ms": 0.33816706854850054,
+          "trad_time_ms": 0.29279105365276337,
+          "savings_pct": 83.15815055592685
         },
         {
           "query": "search_fts method",
-          "arrow_tokens": 3685,
-          "trad_tokens": 18933,
-          "arrow_time_ms": 0.28570799622684717,
-          "trad_time_ms": 0.2733749570325017,
-          "savings_pct": 80.53662916600645
+          "arrow_tokens": 3995,
+          "trad_tokens": 36252,
+          "arrow_time_ms": 0.9445000905543566,
+          "trad_time_ms": 1.2635840103030205,
+          "savings_pct": 88.97991834933245
         },
         {
           "query": "get_file_by_id",
-          "arrow_tokens": 1585,
-          "trad_tokens": 15222,
-          "arrow_time_ms": 0.2538330154493451,
-          "trad_time_ms": 0.23145799059420824,
-          "savings_pct": 89.58743923268952
+          "arrow_tokens": 3197,
+          "trad_tokens": 32541,
+          "arrow_time_ms": 2.082625054754317,
+          "trad_time_ms": 1.5378750395029783,
+          "savings_pct": 90.17547094434714
         },
         {
           "query": "get_chunks_by_ids",
-          "arrow_tokens": 990,
-          "trad_tokens": 7010,
-          "arrow_time_ms": 0.17800007481127977,
-          "trad_time_ms": 0.17137499526143074,
-          "savings_pct": 85.87731811697574
+          "arrow_tokens": 1260,
+          "trad_tokens": 12825,
+          "arrow_time_ms": 1.233292045071721,
+          "trad_time_ms": 0.7749999640509486,
+          "savings_pct": 90.17543859649123
         },
         {
           "query": "search_symbols",
           "arrow_tokens": 965,
-          "trad_tokens": 13407,
-          "arrow_time_ms": 0.1877499744296074,
-          "trad_time_ms": 0.1585420686751604,
-          "savings_pct": 92.802267472216
+          "trad_tokens": 30167,
+          "arrow_time_ms": 1.2692080345004797,
+          "trad_time_ms": 0.3819999983534217,
+          "savings_pct": 96.80114031889151
         },
         {
           "query": "embed_batch method",
-          "arrow_tokens": 3126,
-          "trad_tokens": 24043,
-          "arrow_time_ms": 0.2875830978155136,
-          "trad_time_ms": 0.28804189059883356,
-          "savings_pct": 86.9982947219565
+          "arrow_tokens": 3998,
+          "trad_tokens": 41627,
+          "arrow_time_ms": 0.49245799891650677,
+          "trad_time_ms": 0.49179105553776026,
+          "savings_pct": 90.39565666514522
         },
         {
           "query": "embed_query method",
-          "arrow_tokens": 3457,
-          "trad_tokens": 20674,
-          "arrow_time_ms": 0.28716702945530415,
-          "trad_time_ms": 0.282999943010509,
-          "savings_pct": 83.27851407565058
+          "arrow_tokens": 3983,
+          "trad_tokens": 37993,
+          "arrow_time_ms": 0.4452080465853214,
+          "trad_time_ms": 0.46191608998924494,
+          "savings_pct": 89.51648987971468
         },
         {
           "query": "index_codebase method",
-          "arrow_tokens": 3995,
-          "trad_tokens": 22302,
-          "arrow_time_ms": 0.3677080385386944,
-          "trad_time_ms": 0.32245798502117395,
-          "savings_pct": 82.0868083579948
+          "arrow_tokens": 3934,
+          "trad_tokens": 39886,
+          "arrow_time_ms": 0.6620839703828096,
+          "trad_time_ms": 0.7770000956952572,
+          "savings_pct": 90.13689013689013
         },
         {
           "query": "get_context method",
-          "arrow_tokens": 3929,
-          "trad_tokens": 18933,
-          "arrow_time_ms": 0.30375004280358553,
-          "trad_time_ms": 0.2894169883802533,
-          "savings_pct": 79.24787408229018
+          "arrow_tokens": 3996,
+          "trad_tokens": 36252,
+          "arrow_time_ms": 0.6742090918123722,
+          "trad_time_ms": 0.5572080845013261,
+          "savings_pct": 88.97715988083417
         },
         {
           "query": "reciprocal_rank_fusion",
-          "arrow_tokens": 1072,
-          "trad_tokens": 1815,
-          "arrow_time_ms": 0.15833298675715923,
-          "trad_time_ms": 0.12958294246345758,
-          "savings_pct": 40.93663911845729
+          "arrow_tokens": 1342,
+          "trad_tokens": 2374,
+          "arrow_time_ms": 0.32650004141032696,
+          "trad_time_ms": 0.26775000151246786,
+          "savings_pct": 43.4709351305813
         },
         {
           "query": "generate_project_summary",
           "arrow_tokens": 695,
-          "trad_tokens": 9357,
-          "arrow_time_ms": 0.15650002751499414,
-          "trad_time_ms": 0.14729192480444908,
-          "savings_pct": 92.57240568558298
+          "trad_tokens": 18348,
+          "arrow_time_ms": 0.2847500145435333,
+          "trad_time_ms": 1.1839170474559069,
+          "savings_pct": 96.21212121212122
         },
         {
           "query": "_extract_structure",
           "arrow_tokens": 2927,
-          "trad_tokens": 5184,
-          "arrow_time_ms": 0.1537500647827983,
-          "trad_time_ms": 0.1300830626860261,
-          "savings_pct": 43.5378086419753
+          "trad_tokens": 6008,
+          "arrow_time_ms": 0.3064170014113188,
+          "trad_time_ms": 0.21604192443192005,
+          "savings_pct": 51.28162450066578
         },
         {
           "query": "_extract_imports",
-          "arrow_tokens": 808,
-          "trad_tokens": 5184,
-          "arrow_time_ms": 0.13449997641146183,
-          "trad_time_ms": 0.11104205623269081,
-          "savings_pct": 84.41358024691358
+          "arrow_tokens": 1632,
+          "trad_tokens": 6008,
+          "arrow_time_ms": 0.2145000034943223,
+          "trad_time_ms": 0.18562492914497852,
+          "savings_pct": 72.83621837549934
         },
         {
           "query": "_embed_chunks_async",
           "arrow_tokens": 2718,
-          "trad_tokens": 5184,
-          "arrow_time_ms": 0.16958394553512335,
-          "trad_time_ms": 0.14400004874914885,
-          "savings_pct": 47.56944444444444
+          "trad_tokens": 6008,
+          "arrow_time_ms": 0.27666601818054914,
+          "trad_time_ms": 0.245374976657331,
+          "savings_pct": 54.76031957390146
         }
       ]
     },
     {
       "tier": "Single concept",
       "queries": 10,
-      "arrow_tokens": 19950,
-      "trad_tokens": 131566,
-      "arrow_time_ms": 3.142917063087225,
-      "trad_time_ms": 2.956413896754384,
-      "savings_pct": 84.83650791237858,
+      "arrow_tokens": 21992,
+      "trad_tokens": 242239,
+      "arrow_time_ms": 4.244457115419209,
+      "trad_time_ms": 4.622873151674867,
+      "savings_pct": 90.92136278633912,
       "details": [
         {
           "query": "FTS5 full text search",
-          "arrow_tokens": 3995,
-          "trad_tokens": 28789,
-          "arrow_time_ms": 0.7054170127958059,
-          "trad_time_ms": 0.6166659295558929,
-          "savings_pct": 86.12317204487825
+          "arrow_tokens": 3994,
+          "trad_tokens": 47286,
+          "arrow_time_ms": 0.9648330742493272,
+          "trad_time_ms": 1.0995410848408937,
+          "savings_pct": 91.55352535634226
         },
         {
           "query": "BM25 scoring",
-          "arrow_tokens": 2320,
-          "trad_tokens": 11183,
-          "arrow_time_ms": 0.18079206347465515,
-          "trad_time_ms": 0.1764580374583602,
-          "savings_pct": 79.25422516319414
+          "arrow_tokens": 3075,
+          "trad_tokens": 25165,
+          "arrow_time_ms": 0.26345800142735243,
+          "trad_time_ms": 0.2755420282483101,
+          "savings_pct": 87.7806477250149
         },
         {
           "query": "vector search",
-          "arrow_tokens": 3987,
-          "trad_tokens": 20941,
-          "arrow_time_ms": 0.549459015019238,
-          "trad_time_ms": 0.4700829740613699,
-          "savings_pct": 80.96079461343774
+          "arrow_tokens": 3999,
+          "trad_tokens": 39084,
+          "arrow_time_ms": 0.6787499878555536,
+          "trad_time_ms": 0.6294159684330225,
+          "savings_pct": 89.76819158735032
         },
         {
           "query": "cosine similarity",
-          "arrow_tokens": 1005,
-          "trad_tokens": 2350,
-          "arrow_time_ms": 0.1409159740433097,
-          "trad_time_ms": 0.11404103133827448,
-          "savings_pct": 57.234042553191486
+          "arrow_tokens": 1275,
+          "trad_tokens": 2909,
+          "arrow_time_ms": 0.21483295131474733,
+          "trad_time_ms": 0.18883298616856337,
+          "savings_pct": 56.17050532829151
         },
         {
           "query": "token budget",
-          "arrow_tokens": 3888,
-          "trad_tokens": 22147,
-          "arrow_time_ms": 0.3403330920264125,
-          "trad_time_ms": 0.2997920382767916,
-          "savings_pct": 82.44457488598907
+          "arrow_tokens": 3997,
+          "trad_tokens": 40290,
+          "arrow_time_ms": 0.5063749849796295,
+          "trad_time_ms": 0.4874579608440399,
+          "savings_pct": 90.07942417473318
         },
         {
           "query": "zstd compression",
           "arrow_tokens": 227,
-          "trad_tokens": 8906,
-          "arrow_time_ms": 0.14454091433435678,
-          "trad_time_ms": 0.14283298514783382,
-          "savings_pct": 97.45115652369189
+          "trad_tokens": 14162,
+          "arrow_time_ms": 0.22799998987466097,
+          "trad_time_ms": 0.23670797236263752,
+          "savings_pct": 98.3971190509815
         },
         {
           "query": "xxhash hashing",
           "arrow_tokens": 170,
           "trad_tokens": 160,
-          "arrow_time_ms": 0.12504204642027617,
-          "trad_time_ms": 0.0987909734249115,
+          "arrow_time_ms": 0.19329192582517862,
+          "trad_time_ms": 0.16495806630700827,
           "savings_pct": -6.25
         },
         {
           "query": "tree-sitter parser",
           "arrow_tokens": 0,
           "trad_tokens": 3000,
-          "arrow_time_ms": 0.05708297248929739,
-          "trad_time_ms": 0.027707894332706928,
+          "arrow_time_ms": 0.03687501884996891,
+          "trad_time_ms": 0.024084001779556274,
           "savings_pct": 100.0
         },
         {
           "query": "watchdog file watcher",
-          "arrow_tokens": 3999,
-          "trad_tokens": 28895,
-          "arrow_time_ms": 0.728958984836936,
-          "trad_time_ms": 0.8574590319767594,
-          "savings_pct": 86.16023533483302
+          "arrow_tokens": 3888,
+          "trad_tokens": 47392,
+          "arrow_time_ms": 0.8384580723941326,
+          "trad_time_ms": 1.1960830306634307,
+          "savings_pct": 91.79608372721134
         },
         {
           "query": "SQLite WAL mode",
-          "arrow_tokens": 359,
-          "trad_tokens": 5195,
-          "arrow_time_ms": 0.17037498764693737,
-          "trad_time_ms": 0.15258300118148327,
-          "savings_pct": 93.08950914340713
+          "arrow_tokens": 1367,
+          "trad_tokens": 22791,
+          "arrow_time_ms": 0.3195831086486578,
+          "trad_time_ms": 0.3202500520274043,
+          "savings_pct": 94.00201834057303
         }
       ]
     },
     {
       "tier": "Two concepts",
       "queries": 10,
-      "arrow_tokens": 34793,
-      "trad_tokens": 177044,
-      "arrow_time_ms": 4.177918075583875,
-      "trad_time_ms": 3.798708086833358,
-      "savings_pct": 80.34782314001039,
+      "arrow_tokens": 37889,
+      "trad_tokens": 338415,
+      "arrow_time_ms": 6.065375870093703,
+      "trad_time_ms": 6.161041907034814,
+      "savings_pct": 88.80398327497304,
       "details": [
         {
           "query": "hybrid search ranking",
-          "arrow_tokens": 3999,
-          "trad_tokens": 15757,
-          "arrow_time_ms": 0.44241698924452066,
-          "trad_time_ms": 0.3739590756595135,
-          "savings_pct": 74.62080345243383
+          "arrow_tokens": 3983,
+          "trad_tokens": 33076,
+          "arrow_time_ms": 0.6609169067814946,
+          "trad_time_ms": 0.5819590296596289,
+          "savings_pct": 87.95803603821501
         },
         {
           "query": "vector store persistence",
-          "arrow_tokens": 3996,
-          "trad_tokens": 15746,
-          "arrow_time_ms": 0.39612501859664917,
-          "trad_time_ms": 0.3500409657135606,
-          "savings_pct": 74.6221262542868
+          "arrow_tokens": 3995,
+          "trad_tokens": 39084,
+          "arrow_time_ms": 0.790791935287416,
+          "trad_time_ms": 0.6865840405225754,
+          "savings_pct": 89.77842595435473
         },
         {
           "query": "incremental indexing hash",
-          "arrow_tokens": 3992,
-          "trad_tokens": 19276,
-          "arrow_time_ms": 0.42799999937415123,
-          "trad_time_ms": 0.36562501918524504,
-          "savings_pct": 79.29030919277858
+          "arrow_tokens": 3995,
+          "trad_tokens": 36860,
+          "arrow_time_ms": 0.5512500647455454,
+          "trad_time_ms": 0.5446660798043013,
+          "savings_pct": 89.16169289202386
         },
         {
           "query": "FTS5 trigger sync",
-          "arrow_tokens": 2765,
-          "trad_tokens": 7010,
-          "arrow_time_ms": 0.19308296032249928,
-          "trad_time_ms": 0.17812498845160007,
-          "savings_pct": 60.556348074179745
+          "arrow_tokens": 3994,
+          "trad_tokens": 12825,
+          "arrow_time_ms": 0.3637500340119004,
+          "trad_time_ms": 0.3203749656677246,
+          "savings_pct": 68.85769980506822
         },
         {
           "query": "chunk token counting",
-          "arrow_tokens": 3992,
-          "trad_tokens": 26553,
-          "arrow_time_ms": 0.7588750449940562,
-          "trad_time_ms": 0.6878749700263143,
-          "savings_pct": 84.96591722215945
+          "arrow_tokens": 3999,
+          "trad_tokens": 44696,
+          "arrow_time_ms": 0.8095829980447888,
+          "trad_time_ms": 0.9148339740931988,
+          "savings_pct": 91.05289063898336
         },
         {
           "query": "file discovery gitignore",
-          "arrow_tokens": 3992,
-          "trad_tokens": 28895,
-          "arrow_time_ms": 0.7532089948654175,
-          "trad_time_ms": 0.7942499360069633,
-          "savings_pct": 86.1844609794082
+          "arrow_tokens": 3999,
+          "trad_tokens": 47392,
+          "arrow_time_ms": 0.8443329716101289,
+          "trad_time_ms": 1.1422919342294335,
+          "savings_pct": 91.56186698176907
         },
         {
           "query": "symbol extraction AST",
-          "arrow_tokens": 3993,
-          "trad_tokens": 22302,
-          "arrow_time_ms": 0.31812500674277544,
-          "trad_time_ms": 0.29654207173734903,
-          "savings_pct": 82.09577616357278
+          "arrow_tokens": 3992,
+          "trad_tokens": 42260,
+          "arrow_time_ms": 0.5540000274777412,
+          "trad_time_ms": 0.5527909379452467,
+          "savings_pct": 90.55371509701845
         },
         {
           "query": "import dependency tracking",
-          "arrow_tokens": 3979,
-          "trad_tokens": 25789,
-          "arrow_time_ms": 0.3535420401021838,
-          "trad_time_ms": 0.3375000087544322,
-          "savings_pct": 84.57094109891814
+          "arrow_tokens": 3993,
+          "trad_tokens": 43727,
+          "arrow_time_ms": 0.6913329707458615,
+          "trad_time_ms": 0.6609999109059572,
+          "savings_pct": 90.8683422141926
         },
         {
           "query": "embedding ONNX runtime",
           "arrow_tokens": 1946,
-          "trad_tokens": 7460,
-          "arrow_time_ms": 0.2713750582188368,
-          "trad_time_ms": 0.21645799279212952,
-          "savings_pct": 73.91420911528151
+          "trad_tokens": 8284,
+          "arrow_time_ms": 0.33645902294665575,
+          "trad_time_ms": 0.3157079918310046,
+          "savings_pct": 76.50893288266538
         },
         {
           "query": "MCP tool registration",
-          "arrow_tokens": 2139,
-          "trad_tokens": 8256,
-          "arrow_time_ms": 0.2631669631227851,
-          "trad_time_ms": 0.19833305850625038,
-          "savings_pct": 74.09156976744187
+          "arrow_tokens": 3993,
+          "trad_tokens": 30211,
+          "arrow_time_ms": 0.4629589384421706,
+          "trad_time_ms": 0.4408330423757434,
+          "savings_pct": 86.7829598490616
         }
       ]
     },
     {
       "tier": "How it works",
       "queries": 10,
-      "arrow_tokens": 35721,
-      "trad_tokens": 263327,
-      "arrow_time_ms": 7.695707958191633,
-      "trad_time_ms": 8.755791815929115,
-      "savings_pct": 86.43473703797939,
+      "arrow_tokens": 35906,
+      "trad_tokens": 427370,
+      "arrow_time_ms": 10.687790927477181,
+      "trad_time_ms": 13.580334023572505,
+      "savings_pct": 91.59838079415962,
       "details": [
         {
           "query": "how does hybrid search combine BM25 and vector results",
-          "arrow_tokens": 3988,
-          "trad_tokens": 29314,
-          "arrow_time_ms": 0.8542919531464577,
-          "trad_time_ms": 1.05141696985811,
-          "savings_pct": 86.39557890427783
+          "arrow_tokens": 3998,
+          "trad_tokens": 46070,
+          "arrow_time_ms": 1.145250047557056,
+          "trad_time_ms": 1.5047499909996986,
+          "savings_pct": 91.32190145430866
         },
         {
           "query": "how does incremental indexing detect changed files",
-          "arrow_tokens": 3996,
-          "trad_tokens": 28779,
-          "arrow_time_ms": 0.7672919891774654,
-          "trad_time_ms": 0.6782920099794865,
-          "savings_pct": 86.11487543000105
+          "arrow_tokens": 3988,
+          "trad_tokens": 47276,
+          "arrow_time_ms": 1.0200419928878546,
+          "trad_time_ms": 1.283916993997991,
+          "savings_pct": 91.56443015483543
         },
         {
           "query": "how does the token budget trimming work in get_context",
-          "arrow_tokens": 3998,
-          "trad_tokens": 28949,
-          "arrow_time_ms": 0.9278750512748957,
-          "trad_time_ms": 1.1075829388573766,
-          "savings_pct": 86.189505682407
+          "arrow_tokens": 3994,
+          "trad_tokens": 47446,
+          "arrow_time_ms": 1.4801659854128957,
+          "trad_time_ms": 1.8705000402405858,
+          "savings_pct": 91.58200902078151
         },
         {
           "query": "how does the FTS5 virtual table sync with chunk inserts",
-          "arrow_tokens": 3929,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.917250057682395,
-          "trad_time_ms": 1.0495419846847653,
-          "savings_pct": 86.64967720013593
+          "arrow_tokens": 3999,
+          "trad_tokens": 47927,
+          "arrow_time_ms": 1.3109169667586684,
+          "trad_time_ms": 1.6429589595645666,
+          "savings_pct": 91.65606025830951
         },
         {
           "query": "how does the chunker handle files without tree-sitter support",
           "arrow_tokens": 0,
           "trad_tokens": 3000,
-          "arrow_time_ms": 0.052749994210898876,
-          "trad_time_ms": 0.038375030271708965,
+          "arrow_time_ms": 0.0415419926866889,
+          "trad_time_ms": 0.030415947549045086,
           "savings_pct": 100.0
         },
         {
           "query": "how does the embedder download and cache the ONNX model",
-          "arrow_tokens": 3998,
-          "trad_tokens": 29314,
-          "arrow_time_ms": 0.9474999969825149,
-          "trad_time_ms": 1.1226669885218143,
-          "savings_pct": 86.36146551135975
+          "arrow_tokens": 3978,
+          "trad_tokens": 47811,
+          "arrow_time_ms": 1.2874999083578587,
+          "trad_time_ms": 1.5986250946298242,
+          "savings_pct": 91.67973897220305
         },
         {
           "query": "how does the file watcher debounce rapid changes",
-          "arrow_tokens": 3992,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.8553329389542341,
-          "trad_time_ms": 1.206416985951364,
-          "savings_pct": 86.43560992184845
+          "arrow_tokens": 3999,
+          "trad_tokens": 47238,
+          "arrow_time_ms": 1.1819159844890237,
+          "trad_time_ms": 1.514374976977706,
+          "savings_pct": 91.53435793217325
         },
         {
           "query": "how does the CLI dispatch subcommands",
-          "arrow_tokens": 3912,
-          "trad_tokens": 28139,
-          "arrow_time_ms": 0.7354579865932465,
-          "trad_time_ms": 0.6840410642325878,
-          "savings_pct": 86.09758697892605
+          "arrow_tokens": 3955,
+          "trad_tokens": 46636,
+          "arrow_time_ms": 0.96204096917063,
+          "trad_time_ms": 1.1955000227317214,
+          "savings_pct": 91.51942705206278
         },
         {
           "query": "how does the MCP server initialize global state",
-          "arrow_tokens": 3911,
-          "trad_tokens": 28144,
-          "arrow_time_ms": 0.7979579968377948,
-          "trad_time_ms": 0.8930829353630543,
-          "savings_pct": 86.10361000568506
+          "arrow_tokens": 3998,
+          "trad_tokens": 46641,
+          "arrow_time_ms": 1.1433750623837113,
+          "trad_time_ms": 1.39849993865937,
+          "savings_pct": 91.42814262129886
         },
         {
           "query": "how are imports extracted from Python files",
           "arrow_tokens": 3997,
-          "trad_tokens": 28828,
-          "arrow_time_ms": 0.8399999933317304,
-          "trad_time_ms": 0.924374908208847,
-          "savings_pct": 86.1350076314694
+          "trad_tokens": 47325,
+          "arrow_time_ms": 1.1150420177727938,
+          "trad_time_ms": 1.5407920582219958,
+          "savings_pct": 91.55414685684099
         }
       ]
     },
     {
       "tier": "Cross-file",
       "queries": 10,
-      "arrow_tokens": 31736,
-      "trad_tokens": 224210,
-      "arrow_time_ms": 6.698664976283908,
-      "trad_time_ms": 8.154500043019652,
-      "savings_pct": 85.84541278265911,
+      "arrow_tokens": 31799,
+      "trad_tokens": 370599,
+      "arrow_time_ms": 9.242168045602739,
+      "trad_time_ms": 11.565584223717451,
+      "savings_pct": 91.41956670147518,
       "details": [
         {
           "query": "data flow from file discovery to storage",
-          "arrow_tokens": 3889,
-          "trad_tokens": 29469,
-          "arrow_time_ms": 0.9098330046981573,
-          "trad_time_ms": 1.2804169673472643,
-          "savings_pct": 86.80308120397706
+          "arrow_tokens": 3938,
+          "trad_tokens": 47325,
+          "arrow_time_ms": 1.2672500452026725,
+          "trad_time_ms": 1.7919589299708605,
+          "savings_pct": 91.67881669307977
         },
         {
           "query": "chunk lifecycle from parsing to search results",
-          "arrow_tokens": 3998,
-          "trad_tokens": 28988,
-          "arrow_time_ms": 0.8566660108044744,
-          "trad_time_ms": 1.158667029812932,
-          "savings_pct": 86.20808610459501
+          "arrow_tokens": 3995,
+          "trad_tokens": 47446,
+          "arrow_time_ms": 1.182166044600308,
+          "trad_time_ms": 1.5215830644592643,
+          "savings_pct": 91.57990136154787
         },
         {
           "query": "how indexer calls chunker then storage then embedder",
-          "arrow_tokens": 3996,
-          "trad_tokens": 25858,
-          "arrow_time_ms": 0.8627499919384718,
-          "trad_time_ms": 1.1233750265091658,
-          "savings_pct": 84.54636862866425
+          "arrow_tokens": 3992,
+          "trad_tokens": 44001,
+          "arrow_time_ms": 1.1300418991595507,
+          "trad_time_ms": 1.452209078706801,
+          "savings_pct": 90.92747892093361
         },
         {
           "query": "connection between server.py tools and searcher methods",
           "arrow_tokens": 0,
           "trad_tokens": 3000,
-          "arrow_time_ms": 0.041791005060076714,
-          "trad_time_ms": 0.03070896491408348,
+          "arrow_time_ms": 0.04066701512783766,
+          "trad_time_ms": 0.026540947146713734,
           "savings_pct": 100.0
         },
         {
           "query": "how CLI commands wire up storage indexer searcher",
-          "arrow_tokens": 3895,
-          "trad_tokens": 25863,
-          "arrow_time_ms": 0.8413749746978283,
-          "trad_time_ms": 1.063833013176918,
-          "savings_pct": 84.93987549781541
+          "arrow_tokens": 3999,
+          "trad_tokens": 44360,
+          "arrow_time_ms": 1.1297089513391256,
+          "trad_time_ms": 1.4646250056102872,
+          "savings_pct": 90.98512173128945
         },
         {
           "query": "relationship between VectorStore and HybridSearcher",
-          "arrow_tokens": 3996,
-          "trad_tokens": 29314,
-          "arrow_time_ms": 0.753958011046052,
-          "trad_time_ms": 0.776791013777256,
-          "savings_pct": 86.36828818994337
+          "arrow_tokens": 3991,
+          "trad_tokens": 47811,
+          "arrow_time_ms": 0.979791977442801,
+          "trad_time_ms": 1.2677920749410987,
+          "savings_pct": 91.65254857668738
         },
         {
           "query": "how file watcher triggers re-indexing via indexer",
           "arrow_tokens": 0,
           "trad_tokens": 3000,
-          "arrow_time_ms": 0.03799994010478258,
-          "trad_time_ms": 0.03233307506889105,
+          "arrow_time_ms": 0.03200001083314419,
+          "trad_time_ms": 0.025999965146183968,
           "savings_pct": 100.0
         },
         {
           "query": "flow from search_fts in storage to search in HybridSearcher",
-          "arrow_tokens": 3991,
-          "trad_tokens": 28988,
-          "arrow_time_ms": 0.9874590905383229,
-          "trad_time_ms": 1.393957994878292,
-          "savings_pct": 86.2322340278736
+          "arrow_tokens": 3998,
+          "trad_tokens": 47286,
+          "arrow_time_ms": 1.4291669940575957,
+          "trad_time_ms": 1.8841250566765666,
+          "savings_pct": 91.54506619295351
         },
         {
           "query": "how embedder output goes into vector_store",
-          "arrow_tokens": 3972,
-          "trad_tokens": 28789,
-          "arrow_time_ms": 0.8111660135909915,
-          "trad_time_ms": 0.7779169827699661,
-          "savings_pct": 86.20306367015179
+          "arrow_tokens": 3995,
+          "trad_tokens": 47286,
+          "arrow_time_ms": 1.0140830418094993,
+          "trad_time_ms": 1.141584012657404,
+          "savings_pct": 91.55141056549508
         },
         {
           "query": "how get_context calls search then assembles results",
-          "arrow_tokens": 3999,
-          "trad_tokens": 20941,
-          "arrow_time_ms": 0.5956669338047504,
-          "trad_time_ms": 0.5164999747648835,
-          "savings_pct": 80.9034907597536
+          "arrow_tokens": 3891,
+          "trad_tokens": 39084,
+          "arrow_time_ms": 1.0372920660302043,
+          "trad_time_ms": 0.9891660884022713,
+          "savings_pct": 90.04451949646915
         }
       ]
     },
     {
       "tier": "Debugging",
       "queries": 10,
-      "arrow_tokens": 35855,
-      "trad_tokens": 249383,
-      "arrow_time_ms": 6.979668163694441,
-      "trad_time_ms": 8.602042915299535,
-      "savings_pct": 85.62251637040215,
+      "arrow_tokens": 35697,
+      "trad_tokens": 412895,
+      "arrow_time_ms": 9.834167780354619,
+      "trad_time_ms": 12.212666915729642,
+      "savings_pct": 91.35446057714431,
       "details": [
         {
           "query": "why would FTS5 search return zero results",
-          "arrow_tokens": 3897,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.8258339948952198,
-          "trad_time_ms": 1.128832926042378,
-          "savings_pct": 86.75840978593273
+          "arrow_tokens": 3967,
+          "trad_tokens": 47927,
+          "arrow_time_ms": 1.1352919973433018,
+          "trad_time_ms": 1.4562089927494526,
+          "savings_pct": 91.72282846829553
         },
         {
           "query": "why might get_context be slow",
-          "arrow_tokens": 3999,
-          "trad_tokens": 15900,
-          "arrow_time_ms": 0.3237499622628093,
-          "trad_time_ms": 0.290375086478889,
-          "savings_pct": 74.84905660377359
+          "arrow_tokens": 3989,
+          "trad_tokens": 28787,
+          "arrow_time_ms": 0.6071249954402447,
+          "trad_time_ms": 0.5593339446932077,
+          "savings_pct": 86.14305068259979
         },
         {
           "query": "what happens if tree-sitter fails to parse a file",
           "arrow_tokens": 0,
           "trad_tokens": 3000,
-          "arrow_time_ms": 0.03929203376173973,
-          "trad_time_ms": 0.03170897252857685,
+          "arrow_time_ms": 0.04437495954334736,
+          "trad_time_ms": 0.026792054995894432,
           "savings_pct": 100.0
         },
         {
           "query": "what if the vector store file is corrupted",
-          "arrow_tokens": 3995,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.9267500136047602,
-          "trad_time_ms": 1.2325840070843697,
-          "savings_pct": 86.42541624193001
+          "arrow_tokens": 3896,
+          "trad_tokens": 47767,
+          "arrow_time_ms": 1.29725004080683,
+          "trad_time_ms": 1.6662909183651209,
+          "savings_pct": 91.8437414951745
         },
         {
           "query": "what if a file is deleted while indexing",
-          "arrow_tokens": 3989,
-          "trad_tokens": 29474,
-          "arrow_time_ms": 0.9549589594826102,
-          "trad_time_ms": 1.2337089283391833,
-          "savings_pct": 86.46603786388003
+          "arrow_tokens": 3977,
+          "trad_tokens": 47436,
+          "arrow_time_ms": 1.310915919020772,
+          "trad_time_ms": 1.6646659933030605,
+          "savings_pct": 91.61607218146555
         },
         {
           "query": "error handling in embed_batch",
-          "arrow_tokens": 3989,
-          "trad_tokens": 28949,
-          "arrow_time_ms": 0.7652090862393379,
-          "trad_time_ms": 0.9021249134093523,
-          "savings_pct": 86.22059483919998
+          "arrow_tokens": 3894,
+          "trad_tokens": 47446,
+          "arrow_time_ms": 0.9862089063972235,
+          "trad_time_ms": 1.4178750570863485,
+          "savings_pct": 91.79277494414703
         },
         {
           "query": "what happens when token_count is None in get_context",
           "arrow_tokens": 3997,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.9731251047924161,
-          "trad_time_ms": 1.244083046913147,
-          "savings_pct": 86.4186204553177
+          "trad_tokens": 47767,
+          "arrow_time_ms": 1.4255839632824063,
+          "trad_time_ms": 1.7012909520417452,
+          "savings_pct": 91.63229844871982
         },
         {
           "query": "race condition in file watcher callback",
           "arrow_tokens": 3996,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.8333750301972032,
-          "trad_time_ms": 1.1541249696165323,
-          "savings_pct": 86.42201834862385
+          "trad_tokens": 47392,
+          "arrow_time_ms": 1.0864590294659138,
+          "trad_time_ms": 1.3916660100221634,
+          "savings_pct": 91.56819716407833
         },
         {
           "query": "database locked error in concurrent access",
-          "arrow_tokens": 3995,
-          "trad_tokens": 28949,
-          "arrow_time_ms": 0.797040993347764,
-          "trad_time_ms": 0.8866250282153487,
-          "savings_pct": 86.19986873467131
+          "arrow_tokens": 3985,
+          "trad_tokens": 47446,
+          "arrow_time_ms": 1.0261250426992774,
+          "trad_time_ms": 1.3403339544311166,
+          "savings_pct": 91.60097795388442
         },
         {
           "query": "memory usage with large codebases",
-          "arrow_tokens": 3998,
-          "trad_tokens": 25391,
-          "arrow_time_ms": 0.5403329851105809,
-          "trad_time_ms": 0.4978750366717577,
-          "savings_pct": 84.2542633216494
+          "arrow_tokens": 3996,
+          "trad_tokens": 47927,
+          "arrow_time_ms": 0.9148329263553023,
+          "trad_time_ms": 0.988209038041532,
+          "savings_pct": 91.6623197779957
         }
       ]
     },
     {
       "tier": "Planning",
       "queries": 10,
-      "arrow_tokens": 39795,
-      "trad_tokens": 277203,
-      "arrow_time_ms": 7.481749868020415,
-      "trad_time_ms": 8.86620709206909,
-      "savings_pct": 85.64409476087921,
+      "arrow_tokens": 39901,
+      "trad_tokens": 458582,
+      "arrow_time_ms": 10.70216589141637,
+      "trad_time_ms": 12.796289985999465,
+      "savings_pct": 91.2990479347205,
       "details": [
         {
           "query": "add a new language to the chunker",
-          "arrow_tokens": 3989,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.8408749708905816,
-          "trad_time_ms": 1.166250091046095,
-          "savings_pct": 86.4458036017669
+          "arrow_tokens": 3993,
+          "trad_tokens": 47286,
+          "arrow_time_ms": 1.1114999651908875,
+          "trad_time_ms": 1.4369169948622584,
+          "savings_pct": 91.55564014718945
         },
         {
           "query": "add a new MCP tool for code navigation",
-          "arrow_tokens": 3999,
-          "trad_tokens": 29474,
-          "arrow_time_ms": 0.9170420235022902,
-          "trad_time_ms": 1.1738329194486141,
-          "savings_pct": 86.43210965596796
+          "arrow_tokens": 3958,
+          "trad_tokens": 47971,
+          "arrow_time_ms": 1.1953749926760793,
+          "trad_time_ms": 1.5231659635901451,
+          "savings_pct": 91.7491817973359
         },
         {
           "query": "implement semantic code search with reranking",
-          "arrow_tokens": 3968,
-          "trad_tokens": 29474,
-          "arrow_time_ms": 0.7707499898970127,
-          "trad_time_ms": 0.7270419737324119,
-          "savings_pct": 86.53728710049535
+          "arrow_tokens": 3988,
+          "trad_tokens": 47971,
+          "arrow_time_ms": 1.1122499126940966,
+          "trad_time_ms": 1.2745000422000885,
+          "savings_pct": 91.68664401409184
         },
         {
           "query": "add support for multiple projects in one index",
-          "arrow_tokens": 3987,
-          "trad_tokens": 29474,
-          "arrow_time_ms": 0.8766669780015945,
-          "trad_time_ms": 1.1917079100385308,
-          "savings_pct": 86.47282350546244
+          "arrow_tokens": 3998,
+          "trad_tokens": 47286,
+          "arrow_time_ms": 1.3284999877214432,
+          "trad_time_ms": 1.6202919650822878,
+          "savings_pct": 91.54506619295351
         },
         {
           "query": "implement chunk deduplication across files",
-          "arrow_tokens": 3985,
-          "trad_tokens": 28949,
-          "arrow_time_ms": 0.7393329869955778,
-          "trad_time_ms": 0.8286250522360206,
-          "savings_pct": 86.23441224221907
+          "arrow_tokens": 3999,
+          "trad_tokens": 47446,
+          "arrow_time_ms": 0.9889169596135616,
+          "trad_time_ms": 1.351541024632752,
+          "savings_pct": 91.57147072461325
         },
         {
           "query": "add caching layer for frequent queries",
-          "arrow_tokens": 3993,
-          "trad_tokens": 29474,
-          "arrow_time_ms": 0.7881249766796827,
-          "trad_time_ms": 0.9755829814821482,
-          "savings_pct": 86.45246658071521
+          "arrow_tokens": 3998,
+          "trad_tokens": 47971,
+          "arrow_time_ms": 1.0740410070866346,
+          "trad_time_ms": 1.366041018627584,
+          "savings_pct": 91.66579808634383
         },
         {
           "query": "implement streaming search results",
-          "arrow_tokens": 3986,
-          "trad_tokens": 15757,
-          "arrow_time_ms": 0.4295839462429285,
-          "trad_time_ms": 0.3904580371454358,
-          "savings_pct": 74.70330646696706
+          "arrow_tokens": 3996,
+          "trad_tokens": 33076,
+          "arrow_time_ms": 0.7285000756382942,
+          "trad_time_ms": 0.7292089285328984,
+          "savings_pct": 87.91873261579393
         },
         {
           "query": "add support for searching by file type",
-          "arrow_tokens": 3999,
-          "trad_tokens": 29474,
-          "arrow_time_ms": 0.8570000063627958,
-          "trad_time_ms": 1.1896250071004033,
-          "savings_pct": 86.43210965596796
+          "arrow_tokens": 3996,
+          "trad_tokens": 47238,
+          "arrow_time_ms": 1.3151250313967466,
+          "trad_time_ms": 1.5421250136569142,
+          "savings_pct": 91.54070875142894
         },
         {
           "query": "implement code change impact analysis",
-          "arrow_tokens": 3902,
-          "trad_tokens": 26383,
-          "arrow_time_ms": 0.5037910304963589,
-          "trad_time_ms": 0.44825009535998106,
-          "savings_pct": 85.21017321760225
+          "arrow_tokens": 3978,
+          "trad_tokens": 44526,
+          "arrow_time_ms": 0.7982079405337572,
+          "trad_time_ms": 0.7263330044224858,
+          "savings_pct": 91.06589408435521
         },
         {
           "query": "add telemetry and usage statistics",
-          "arrow_tokens": 3987,
-          "trad_tokens": 29314,
-          "arrow_time_ms": 0.7585829589515924,
-          "trad_time_ms": 0.7748330244794488,
-          "savings_pct": 86.39899024356963
+          "arrow_tokens": 3997,
+          "trad_tokens": 47811,
+          "arrow_time_ms": 1.04975001886487,
+          "trad_time_ms": 1.2261660303920507,
+          "savings_pct": 91.63999916337244
         }
       ]
     },
     {
       "tier": "Architecture",
       "queries": 10,
-      "arrow_tokens": 39819,
-      "trad_tokens": 712856,
-      "arrow_time_ms": 7.748207543045282,
-      "trad_time_ms": 8.406540378928185,
-      "savings_pct": 94.41415938141785,
+      "arrow_tokens": 39906,
+      "trad_tokens": 1175121,
+      "arrow_time_ms": 10.223126271739602,
+      "trad_time_ms": 12.623250135220587,
+      "savings_pct": 96.6040943868759,
       "details": [
         {
           "query": "review the overall module dependency graph",
           "arrow_tokens": 3991,
-          "trad_tokens": 112400,
-          "arrow_time_ms": 0.8533749496564269,
-          "trad_time_ms": 0.7018329342827201,
-          "savings_pct": 96.44928825622776
+          "trad_tokens": 186388,
+          "arrow_time_ms": 0.9914590045809746,
+          "trad_time_ms": 1.2262080563232303,
+          "savings_pct": 97.85876773182824
         },
         {
           "query": "evaluate the storage schema design decisions",
-          "arrow_tokens": 3991,
-          "trad_tokens": 28100,
-          "arrow_time_ms": 0.818458036519587,
-          "trad_time_ms": 1.1314160656183958,
-          "savings_pct": 85.79715302491103
+          "arrow_tokens": 3995,
+          "trad_tokens": 46597,
+          "arrow_time_ms": 1.0939170606434345,
+          "trad_time_ms": 1.417249906808138,
+          "savings_pct": 91.42648668369209
         },
         {
           "query": "assess the hybrid search ranking strategy",
-          "arrow_tokens": 3918,
-          "trad_tokens": 28100,
-          "arrow_time_ms": 0.7395829306915402,
-          "trad_time_ms": 0.7216250523924828,
-          "savings_pct": 86.05693950177937
+          "arrow_tokens": 3982,
+          "trad_tokens": 46597,
+          "arrow_time_ms": 1.0096250334754586,
+          "trad_time_ms": 1.1960840784013271,
+          "savings_pct": 91.45438547545979
         },
         {
           "query": "review error handling patterns across the codebase",
-          "arrow_tokens": 3965,
-          "trad_tokens": 115156,
-          "arrow_time_ms": 0.7771248929202557,
-          "trad_time_ms": 0.7629171013832092,
-          "savings_pct": 96.5568446281566
+          "arrow_tokens": 3989,
+          "trad_tokens": 189144,
+          "arrow_time_ms": 1.0476669995114207,
+          "trad_time_ms": 1.3048750115558505,
+          "savings_pct": 97.89102482764454
         },
         {
           "query": "evaluate the embedding pipeline performance",
-          "arrow_tokens": 3996,
-          "trad_tokens": 28100,
-          "arrow_time_ms": 0.6380830891430378,
-          "trad_time_ms": 0.5989581113681197,
-          "savings_pct": 85.77935943060498
+          "arrow_tokens": 3995,
+          "trad_tokens": 46597,
+          "arrow_time_ms": 0.8943750290200114,
+          "trad_time_ms": 0.9930829983204603,
+          "savings_pct": 91.42648668369209
         },
         {
           "query": "review the Docker deployment architecture",
-          "arrow_tokens": 3994,
-          "trad_tokens": 112400,
-          "arrow_time_ms": 0.6277079228311777,
-          "trad_time_ms": 0.5702080670744181,
-          "savings_pct": 96.44661921708185
+          "arrow_tokens": 3996,
+          "trad_tokens": 186388,
+          "arrow_time_ms": 0.8953340584412217,
+          "trad_time_ms": 0.9925420163199306,
+          "savings_pct": 97.85608515569672
         },
         {
           "query": "assess the testing strategy and coverage",
-          "arrow_tokens": 3997,
-          "trad_tokens": 29314,
-          "arrow_time_ms": 0.7852918934077024,
-          "trad_time_ms": 0.9036250412464142,
-          "savings_pct": 86.36487685065156
+          "arrow_tokens": 3990,
+          "trad_tokens": 47811,
+          "arrow_time_ms": 1.0123749962076545,
+          "trad_time_ms": 1.3925000093877316,
+          "savings_pct": 91.6546401455732
         },
         {
           "query": "review the CLI argument parsing design",
-          "arrow_tokens": 3986,
-          "trad_tokens": 112556,
-          "arrow_time_ms": 0.80241693649441,
-          "trad_time_ms": 0.6920830346643925,
-          "savings_pct": 96.4586516933793
+          "arrow_tokens": 3996,
+          "trad_tokens": 186544,
+          "arrow_time_ms": 0.981958000920713,
+          "trad_time_ms": 1.2396250385791063,
+          "savings_pct": 97.85787803413672
         },
         {
           "query": "evaluate the file watching and sync strategy",
-          "arrow_tokens": 3989,
-          "trad_tokens": 29474,
-          "arrow_time_ms": 0.8488749153912067,
-          "trad_time_ms": 1.1697500012814999,
-          "savings_pct": 86.46603786388003
+          "arrow_tokens": 3995,
+          "trad_tokens": 47811,
+          "arrow_time_ms": 1.1943330755457282,
+          "trad_time_ms": 1.4425000408664346,
+          "savings_pct": 91.64418230114408
         },
         {
           "query": "review the compression and storage tradeoffs",
-          "arrow_tokens": 3992,
-          "trad_tokens": 117256,
-          "arrow_time_ms": 0.8572919759899378,
-          "trad_time_ms": 1.1541249696165323,
-          "savings_pct": 96.59548338677764
+          "arrow_tokens": 3977,
+          "trad_tokens": 191244,
+          "arrow_time_ms": 1.1020830133929849,
+          "trad_time_ms": 1.4185829786583781,
+          "savings_pct": 97.92045763527221
         }
       ]
     },
     {
       "tier": "Exploratory",
       "queries": 10,
-      "arrow_tokens": 39828,
-      "trad_tokens": 816129,
-      "arrow_time_ms": 8.563249837607145,
-      "trad_time_ms": 9.964333265088499,
-      "savings_pct": 95.11988913517348,
+      "arrow_tokens": 39673,
+      "trad_tokens": 1334045,
+      "arrow_time_ms": 12.792875873856246,
+      "trad_time_ms": 14.898622990585864,
+      "savings_pct": 97.02611231255317,
       "details": [
         {
           "query": "give me a complete overview of this project",
-          "arrow_tokens": 3905,
-          "trad_tokens": 117720,
-          "arrow_time_ms": 1.1765420204028487,
-          "trad_time_ms": 1.2840420240536332,
-          "savings_pct": 96.68280665987088
+          "arrow_tokens": 3889,
+          "trad_tokens": 191708,
+          "arrow_time_ms": 1.2189160333946347,
+          "trad_time_ms": 1.5444160671904683,
+          "savings_pct": 97.97139399503412
         },
         {
           "query": "what are all the external dependencies and why",
-          "arrow_tokens": 3998,
-          "trad_tokens": 117256,
-          "arrow_time_ms": 0.8801659569144249,
-          "trad_time_ms": 1.0259579867124557,
-          "savings_pct": 96.59036637783994
+          "arrow_tokens": 3896,
+          "trad_tokens": 191244,
+          "arrow_time_ms": 1.1386669939383864,
+          "trad_time_ms": 1.468457980081439,
+          "savings_pct": 97.9628119052101
         },
         {
           "query": "summarize every module and its responsibility",
-          "arrow_tokens": 3998,
-          "trad_tokens": 117256,
-          "arrow_time_ms": 0.7800830062478781,
-          "trad_time_ms": 0.747166108340025,
-          "savings_pct": 96.59036637783994
+          "arrow_tokens": 3930,
+          "trad_tokens": 191244,
+          "arrow_time_ms": 1.0366669157519937,
+          "trad_time_ms": 1.1997909750789404,
+          "savings_pct": 97.94503356968062
         },
         {
           "query": "list all configuration options and defaults",
-          "arrow_tokens": 3990,
-          "trad_tokens": 117256,
-          "arrow_time_ms": 0.8086670422926545,
-          "trad_time_ms": 1.034500077366829,
-          "savings_pct": 96.59718905642355
+          "arrow_tokens": 3996,
+          "trad_tokens": 191244,
+          "arrow_time_ms": 1.0504579404368997,
+          "trad_time_ms": 1.4568340266123414,
+          "savings_pct": 97.91052268306457
         },
         {
           "query": "what are the main performance bottlenecks",
-          "arrow_tokens": 3998,
-          "trad_tokens": 28828,
-          "arrow_time_ms": 0.6823329022154212,
-          "trad_time_ms": 0.6322079570963979,
-          "savings_pct": 86.13153878173998
+          "arrow_tokens": 3999,
+          "trad_tokens": 47325,
+          "arrow_time_ms": 1.0126250563189387,
+          "trad_time_ms": 1.0895419400185347,
+          "savings_pct": 91.5499207606973
         },
         {
           "query": "what test coverage exists and what is missing",
-          "arrow_tokens": 3993,
-          "trad_tokens": 29314,
-          "arrow_time_ms": 0.8628750219941139,
-          "trad_time_ms": 1.1042500846087933,
-          "savings_pct": 86.37852220781879
+          "arrow_tokens": 3991,
+          "trad_tokens": 47811,
+          "arrow_time_ms": 1.931375009007752,
+          "trad_time_ms": 1.8237909534946084,
+          "savings_pct": 91.65254857668738
         },
         {
           "query": "how would I contribute a new feature to this project",
-          "arrow_tokens": 3993,
-          "trad_tokens": 117720,
-          "arrow_time_ms": 0.9380000410601497,
-          "trad_time_ms": 1.2290000449866056,
-          "savings_pct": 96.60805300713558
+          "arrow_tokens": 3996,
+          "trad_tokens": 191708,
+          "arrow_time_ms": 1.9891669508069754,
+          "trad_time_ms": 1.8230000277981162,
+          "savings_pct": 97.91557994449892
         },
         {
           "query": "what security considerations exist in this codebase",
-          "arrow_tokens": 3990,
-          "trad_tokens": 28949,
-          "arrow_time_ms": 0.8065419970080256,
-          "trad_time_ms": 1.0413340060040355,
-          "savings_pct": 86.2171404884452
+          "arrow_tokens": 3991,
+          "trad_tokens": 47446,
+          "arrow_time_ms": 1.1242079781368375,
+          "trad_time_ms": 1.431916025467217,
+          "savings_pct": 91.58833199848249
         },
         {
           "query": "compare the search approaches used here",
-          "arrow_tokens": 3984,
-          "trad_tokens": 112400,
-          "arrow_time_ms": 0.7389169186353683,
-          "trad_time_ms": 0.7338749710470438,
-          "savings_pct": 96.45551601423487
+          "arrow_tokens": 3993,
+          "trad_tokens": 186388,
+          "arrow_time_ms": 0.9835839737206697,
+          "trad_time_ms": 1.1676250724121928,
+          "savings_pct": 97.85769470137562
         },
         {
           "query": "what would need to change to support a REST API",
-          "arrow_tokens": 3979,
-          "trad_tokens": 29430,
-          "arrow_time_ms": 0.8891249308362603,
-          "trad_time_ms": 1.1320000048726797,
-          "savings_pct": 86.4797825348284
+          "arrow_tokens": 3992,
+          "trad_tokens": 47927,
+          "arrow_time_ms": 1.3072090223431587,
+          "trad_time_ms": 1.8932499224320054,
+          "savings_pct": 91.67066580424395
         }
       ]
     }

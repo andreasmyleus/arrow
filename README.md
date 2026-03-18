@@ -12,7 +12,7 @@
 [![MCP Tools](https://img.shields.io/badge/MCP%20tools-27-purple.svg)](#available-mcp-tools-27)
 
 ```
-96% fewer tokens   |   0.6ms avg query   |   64+ languages   |   27 MCP tools
+15x fewer tokens   |   sub-1ms queries   |   64+ languages   |   27 MCP tools
 ```
 
 </div>
@@ -132,46 +132,58 @@ That's it. Claude will now use Arrow automatically for all code lookups.
 
 ### Micro-benchmarks
 
-| Operation | Speed |
-|-----------|-------|
-| Hashing | 6,300 MB/s (xxHash3-128) |
-| Indexing | 146 files/s (tree-sitter + tokenization) |
-| Incremental check | 2ms (hash check only) |
-| Search | 0.5ms per query (FTS5 BM25) |
-| get_context | 1-4ms (search + rank + token trim) |
+| Operation | Speed | Details |
+|-----------|-------|---------|
+| Hashing | 3,300 MB/s | xxHash3-128, 10K ops |
+| Token counting | 2,081 ops/s | tiktoken cl100k_base |
+| Indexing | 71 files/s | tree-sitter + tokenization |
+| Incremental check | 70ms | 14 files, hash check only |
+| Search (p50) | 0.45ms | FTS5 BM25, 10 results |
+| Search (p99) | 0.60ms | Consistent low latency |
+| get_context | 0.8-0.95ms | search + rank + token trim |
+| Budget fill rate | 82-99% | Fills budget efficiently |
 
 ### Arrow vs Traditional (Grep + Read)
 
-Real-world coding tasks on Arrow's own codebase. Arrow uses `get_context` with a 4000-token budget. Traditional uses Glob + Grep + Read.
+110 queries across 10 complexity tiers. Arrow uses `get_context` with a 4000-token budget. Traditional simulates Glob + Grep + Read (entire file reads). Benchmarked on Arrow's own codebase (14 files, 219 chunks).
 
-| Task | Arrow | Traditional | Savings |
-|------|-------|-------------|---------|
-| How does hybrid search work? | 3,976 tok / 4ms | ~6,999 tok / 22ms | **43%** |
-| Find storage/database functions | 3,990 tok / 1ms | ~20,243 tok / 10ms | **80%** |
-| Add new MCP tool | 3,949 tok / 1ms | ~62,135 tok / 13.2s | **94%** |
-| Review Docker setup | 3,961 tok / 0ms | ~970,799 tok / 12.6s | **100%** |
-| **Total (10 tasks)** | **39,773 tok / 14ms** | **~1,127,712 tok / 25.9s** | **96%** |
+```
+Token efficiency:  15.2x (Arrow uses 1/15th the tokens)
+Overall savings:   93.4%
+Median savings:    91.5%
+Arrow p50 latency: 0.95ms
+Arrow p99 latency: 1.99ms
+```
+
+| Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings |
+|-----------------|---------|-------------|-------------------|---------|
+| Symbol lookup | 15 | 46,413 | 507,639 | **91%** |
+| Method lookup | 15 | 41,409 | 362,634 | **89%** |
+| Single concept | 10 | 21,992 | 242,239 | **91%** |
+| Two concepts | 10 | 37,889 | 338,415 | **89%** |
+| How-does-X-work | 10 | 35,906 | 427,370 | **92%** |
+| Cross-file tracing | 10 | 31,799 | 370,599 | **91%** |
+| Debugging | 10 | 35,697 | 412,895 | **91%** |
+| Implementation planning | 10 | 39,901 | 458,582 | **91%** |
+| Architecture review | 10 | 39,906 | 1,175,121 | **97%** |
+| Broad / exploratory | 10 | 39,673 | 1,334,045 | **97%** |
+| **Total** | **110** | **370,585** | **5,629,539** | **93.4%** |
+
+Total benchmark time: **92ms** (0.8ms avg per query).
 
 <details>
-<summary><b>Full 110-query benchmark across 10 complexity tiers</b></summary>
+<summary><b>Index statistics</b></summary>
 
-All queries use a 4000-token budget. Benchmarked on Arrow's own codebase (14 files, 161 chunks).
-
-| Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings | Avg Time |
-|-----------------|---------|-------------|-------------------|---------|----------|
-| Symbol lookup | 15 | 45,857 | 289,543 | 84% | 0.4ms |
-| Method lookup | 15 | 36,717 | 199,929 | 82% | 0.2ms |
-| Single concept | 10 | 19,950 | 131,566 | 85% | 0.3ms |
-| Two concepts | 10 | 34,793 | 177,044 | 80% | 0.4ms |
-| How-does-X-work | 10 | 35,721 | 263,327 | 86% | 0.8ms |
-| Cross-file tracing | 10 | 31,736 | 224,210 | 86% | 0.7ms |
-| Debugging | 10 | 35,855 | 249,383 | 86% | 0.7ms |
-| Implementation planning | 10 | 39,795 | 277,203 | 86% | 0.7ms |
-| Architecture review | 10 | 39,819 | 712,856 | 94% | 0.8ms |
-| Broad / exploratory | 10 | 39,828 | 816,129 | 95% | 0.9ms |
-| **Total** | **110** | **360,071** | **3,341,190** | **89%** | **0.6ms** |
-
-Total benchmark time: **62ms** (0.6ms avg per query).
+```
+Files:       14
+Chunks:      219
+Symbols:     216
+Imports:     261
+Chunks/file: 15.6 avg
+Tokens:      47,730 total, 218 avg, 13-2085 range
+Languages:   python(14)
+Chunk kinds: function(203), class(14), module(2)
+```
 
 </details>
 

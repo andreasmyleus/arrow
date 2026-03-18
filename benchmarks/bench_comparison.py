@@ -326,6 +326,60 @@ def run_benchmark(target_path: str):
     print(f"  Total Trad time:  {grand_trad_time*1000:.0f}ms "
           f"({grand_trad_time*1000/total_queries:.1f}ms per query)")
 
+    # Collect all per-query metrics for aggregate stats
+    all_arrow_latencies = []
+    all_savings = []
+    all_arrow_tokens = []
+    all_trad_tokens = []
+    for tier in tier_results:
+        for d in tier["details"]:
+            all_arrow_latencies.append(d["arrow_time_ms"])
+            all_savings.append(d["savings_pct"])
+            all_arrow_tokens.append(d["arrow_tokens"])
+            all_trad_tokens.append(d["trad_tokens"])
+
+    import statistics
+    p50_lat = statistics.median(all_arrow_latencies)
+    p95_lat = sorted(all_arrow_latencies)[int(len(all_arrow_latencies) * 0.95)]
+    p99_lat = sorted(all_arrow_latencies)[int(len(all_arrow_latencies) * 0.99)]
+    min_savings = min(all_savings)
+    max_savings = max(all_savings)
+    median_savings = statistics.median(all_savings)
+    avg_arrow_tok = statistics.mean(all_arrow_tokens)
+    avg_trad_tok = statistics.mean(all_trad_tokens)
+    token_ratio = grand_trad_tokens / max(grand_arrow_tokens, 1)
+
+    # Best and worst queries by savings
+    all_details = []
+    for tier in tier_results:
+        for d in tier["details"]:
+            all_details.append(d)
+    all_details_sorted = sorted(all_details, key=lambda x: x["savings_pct"])
+    worst_3 = all_details_sorted[:3]
+    best_3 = all_details_sorted[-3:]
+
+    print(f"\n  {'─' * 60}")
+    print(f"  Aggregate Statistics")
+    print(f"  {'─' * 60}")
+    print(f"  Token efficiency ratio:  {token_ratio:.1f}x "
+          f"(Arrow uses 1/{token_ratio:.0f}th the tokens)")
+    print(f"  Avg Arrow tokens/query:  {avg_arrow_tok:,.0f}")
+    print(f"  Avg Trad tokens/query:   {avg_trad_tok:,.0f}")
+    print(f"  Savings range:           {min_savings:.0f}% - {max_savings:.0f}%")
+    print(f"  Median savings:          {median_savings:.1f}%")
+    print(f"  Arrow latency p50:       {p50_lat:.2f}ms")
+    print(f"  Arrow latency p95:       {p95_lat:.2f}ms")
+    print(f"  Arrow latency p99:       {p99_lat:.2f}ms")
+
+    print(f"\n  Top 3 highest savings:")
+    for d in reversed(best_3):
+        print(f"    {d['savings_pct']:.0f}% - \"{d['query']}\" "
+              f"({d['arrow_tokens']:,d} vs {d['trad_tokens']:,d} tok)")
+    print(f"\n  Top 3 lowest savings:")
+    for d in worst_3:
+        print(f"    {d['savings_pct']:.0f}% - \"{d['query']}\" "
+              f"({d['arrow_tokens']:,d} vs {d['trad_tokens']:,d} tok)")
+
     # Save detailed results as JSON
     output = {
         "target": str(target_path),
@@ -333,6 +387,14 @@ def run_benchmark(target_path: str):
         "grand_arrow_tokens": grand_arrow_tokens,
         "grand_trad_tokens": grand_trad_tokens,
         "grand_savings_pct": grand_savings,
+        "token_efficiency_ratio": round(token_ratio, 1),
+        "avg_arrow_tokens_per_query": round(avg_arrow_tok),
+        "avg_trad_tokens_per_query": round(avg_trad_tok),
+        "savings_range_pct": [round(min_savings, 1), round(max_savings, 1)],
+        "median_savings_pct": round(median_savings, 1),
+        "arrow_latency_p50_ms": round(p50_lat, 2),
+        "arrow_latency_p95_ms": round(p95_lat, 2),
+        "arrow_latency_p99_ms": round(p99_lat, 2),
         "arrow_total_time_ms": grand_arrow_time * 1000,
         "arrow_avg_time_ms": arrow_avg_ms,
         "trad_total_time_ms": grand_trad_time * 1000,
