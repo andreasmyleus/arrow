@@ -95,11 +95,15 @@ def _get_searcher() -> HybridSearcher:
     return _searcher
 
 
+_project_locks_guard = threading.Lock()
+
+
 def _get_project_lock(project_id: int) -> threading.Lock:
     """Get or create a per-project lock for write serialization."""
-    if project_id not in _project_locks:
-        _project_locks[project_id] = threading.Lock()
-    return _project_locks[project_id]
+    with _project_locks_guard:
+        if project_id not in _project_locks:
+            _project_locks[project_id] = threading.Lock()
+        return _project_locks[project_id]
 
 
 def _start_watcher(project_id: int, root: str) -> None:
@@ -113,8 +117,15 @@ def _start_watcher(project_id: int, root: str) -> None:
             logger.debug("Skipping re-index for project %d, already running", project_id)
             return
         try:
-            indexer = _get_indexer()
-            indexer.index_codebase(root)
+            # Create dedicated storage/indexer for this thread
+            # (SQLite connections can't cross threads)
+            from .storage import Storage as _S
+
+            db_path = os.environ.get("ARROW_DB_PATH", str(DEFAULT_DB_PATH))
+            thread_storage = _S(db_path)
+            thread_indexer = Indexer(thread_storage)
+            thread_indexer.index_codebase(root)
+            thread_storage.close()
             logger.info("Background re-index complete for %s", root)
         except Exception:
             logger.exception("Background re-index failed for %s", root)
@@ -145,13 +156,36 @@ def _start_all_watchers() -> None:
                     _start_watcher(project.id, root)
 
 
+_PROJECT_NOT_FOUND = -1  # Sentinel for project name given but not found
+
+
 def _resolve_project_id(project: str | None) -> int | None:
-    """Resolve optional project name to project_id."""
+    """Resolve optional project name to project_id.
+
+    Returns None if project is None (search all projects).
+    Returns the project ID if found.
+    Returns _PROJECT_NOT_FOUND (-1) if the project name was given but not
+    found, so callers don't silently fall back to all-projects search.
+    """
     if project is None:
         return None
     storage = _get_storage()
     proj = storage.get_project_by_name(project)
-    return proj.id if proj else None
+    if proj is None:
+        return _PROJECT_NOT_FOUND
+    return proj.id
+
+
+def _check_project_id(project_id: int | None, project: str) -> str | None:
+    """Return a JSON error string if project_id is the not-found sentinel."""
+    if project_id == _PROJECT_NOT_FOUND:
+        storage = _get_storage()
+        available = [p.name for p in storage.list_projects()]
+        return json.dumps({
+            "error": f"Project not found: {project}",
+            "available_projects": available,
+        })
+    return None
 
 
 # Default compact threshold: 256k tokens
@@ -401,6 +435,10 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
         })
 
     project_id = _resolve_project_id(project)
+    err = _check_project_id(project_id, project) if project else None
+    if err:
+        return err
+
     searcher = _get_searcher()
     results = searcher.search(query, limit=limit, project_id=project_id)
 
@@ -448,6 +486,10 @@ def get_context(
         })
 
     project_id = _resolve_project_id(project)
+    err = _check_project_id(project_id, project) if project else None
+    if err:
+        return err
+
     searcher = _get_searcher()
 
     # Auto-estimate budget if not specified
@@ -501,6 +543,21 @@ def get_context(
     context["compact_threshold"] = compact_threshold
     pct = round(session_tokens / compact_threshold * 100, 1)
     context["context_pressure_pct"] = pct
+
+    # Add search hints when no results found to help the agent pivot
+    if not context.get("chunks"):
+        stats = storage.get_stats(project_id=project_id)
+        context["suggestions"] = [
+            "Try broader or alternative keywords",
+            "Use search_structure() to find by function/class name",
+            "Use file_summary() if you know the file path",
+        ]
+        context["indexed_stats"] = {
+            "files": stats["files"],
+            "chunks": stats["chunks"],
+            "languages": list(stats["languages"].keys()),
+        }
+
     return json.dumps(context, indent=2)
 
 
@@ -663,11 +720,11 @@ def file_summary(path: str, project: str | None = None) -> str:
     total_tokens = 0
 
     for chunk in chunks:
-        total_tokens += chunk.token_count
+        total_tokens += chunk.token_count or 0
         entry = {
             "name": chunk.name,
             "lines": f"{chunk.start_line}-{chunk.end_line}",
-            "tokens": chunk.token_count,
+            "tokens": chunk.token_count or 0,
         }
         if chunk.kind in ("function", "method"):
             functions.append(entry)

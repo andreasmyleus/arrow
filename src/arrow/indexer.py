@@ -46,10 +46,10 @@ class Indexer:
         self.vector_store = vector_store
         self.embedder = embedder
 
-    def _embed_chunks_async(self, chunk_ids: list[int], texts: list[str]) -> None:
+    def _embed_chunks_async(self, chunk_ids: list[int], texts: list[str]) -> Optional[threading.Thread]:
         """Generate embeddings in a background thread."""
         if not self.embedder or not self.vector_store:
-            return
+            return None
 
         def _do_embed():
             try:
