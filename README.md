@@ -23,6 +23,45 @@ Search:       0.5ms per query (FTS5 BM25)
 get_context:  5-7ms (search + rank + token trim)
 ```
 
+## CLI
+
+Arrow includes a full CLI for indexing, searching, and serving without Claude Code.
+
+```
+arrow <command> [options]
+
+Commands:
+  serve     Start the MCP server (stdio or HTTP)
+  index     Index a codebase
+  search    Search the indexed codebase
+  context   Get relevant code within a token budget
+  status    Show index status and stats
+  symbols   Search for symbols (functions, classes, etc.)
+```
+
+### Examples
+
+```bash
+# Index a project
+arrow index /path/to/project
+
+# Check what's indexed
+arrow status
+
+# Search for code
+arrow search "database connection"
+
+# Get context-window-friendly output
+arrow context "authentication flow" --budget 4000
+
+# Find all functions named "parse"
+arrow symbols parse --kind function
+
+# Start MCP server for Claude Code
+arrow serve
+arrow serve --transport http --port 8080
+```
+
 ## Installation
 
 ```bash
@@ -40,12 +79,18 @@ Requires Python 3.10+.
 ### 1. Register with Claude Code
 
 ```bash
-claude mcp add --transport stdio arrow -- /path/to/arrow/.venv/bin/python -m arrow
+claude mcp add --transport stdio arrow -- /path/to/arrow/.venv/bin/python -m arrow serve
 ```
 
 ### 2. Index your project
 
-Use the `index_codebase` tool in Claude Code:
+From the CLI:
+
+```bash
+arrow index /path/to/project
+```
+
+Or via MCP in Claude Code:
 
 ```
 > Index my codebase at /path/to/project
