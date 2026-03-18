@@ -9,10 +9,10 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-197%20passing-brightgreen.svg)](#running-tests)
-[![MCP Tools](https://img.shields.io/badge/MCP%20tools-27-purple.svg)](#available-mcp-tools-27)
+[![MCP Tools](https://img.shields.io/badge/MCP%20tools-28-purple.svg)](#available-mcp-tools-28)
 
 ```
-15x fewer tokens   |   sub-1ms queries   |   64+ languages   |   27 MCP tools
+15x fewer tokens   |   sub-1ms queries   |   64+ languages   |   28 MCP tools
 ```
 
 </div>
@@ -74,6 +74,18 @@ Use these MCP tools BEFORE reading files manually:
 - `store_memory(key, content)` / `recall_memory(query)` — persist knowledge across sessions
 - `context_pressure()` — check context window usage
 - `list_projects()` — see all indexed repos
+- `index_github_repo(owner, repo)` — clone + index a remote GitHub repo (uses `gh` CLI)
+```
+
+Add a remote repos section to your CLAUDE.md if you work across GitHub repos:
+
+```markdown
+## Remote Repos
+
+When you need code from a GitHub repo:
+1. Always check the index first — use `search_code(query, project="owner/repo")`
+2. If not indexed, use `index_github_repo(owner, repo)` to clone and index in one step
+3. Never manually fetch + pass files — `index_github_repo` handles cloning, caching, and incremental updates
 ```
 
 That's it. Claude will now use Arrow automatically for all code lookups.
@@ -112,6 +124,7 @@ That's it. Claude will now use Arrow automatically for all code lookups.
 | **Git-aware** | Tracks branch + HEAD commit per project, auto-updates on commits |
 | **Git history snapshots** | Index code at any commit, tag, or branch for historical search |
 | **PR review** | Index both sides of a PR (base + head) for comparison |
+| **GitHub repo cloning** | One-command clone + index of any GitHub repo via `gh` CLI |
 | **GitHub remote caching** | Cache content from GitHub MCP reads for cross-project search |
 | **Automatic re-indexing** | Watchdog monitors file changes per-project, re-indexes in background |
 
@@ -189,7 +202,7 @@ Chunk kinds: function(203), class(14), module(2)
 
 ---
 
-## Available MCP Tools (27)
+## Available MCP Tools (28)
 
 ### Indexing
 
@@ -199,6 +212,7 @@ Chunk kinds: function(203), class(14), module(2)
 | `index_git_commit(path, ref)` | Index at a specific commit/tag/branch |
 | `index_pr(path, pr_number)` | Index both sides of a PR for review |
 | `index_github_content(owner, repo, branch, files)` | Cache remote GitHub content |
+| `index_github_repo(owner, repo, branch?, sparse_paths?)` | Clone + index a GitHub repo via `gh` CLI |
 
 ### Search & Context
 

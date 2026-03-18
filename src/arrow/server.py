@@ -798,7 +798,6 @@ def index_github_repo(
         JSON status with file/chunk counts, timing, and clone path.
     """
     import shutil
-    import tempfile
 
     name = f"{owner}/{repo}"
     storage = _get_storage()
@@ -910,6 +909,26 @@ def index_github_repo(
                 idx_result["project_name"] = name
             except Exception:
                 pass  # Name conflict, keep auto-detected name
+
+    # Verify we indexed the latest version
+    indexed_project = storage.get_project(pid) if pid else None
+    if indexed_project and indexed_project.git_commit:
+        try:
+            remote_check = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/commits/{branch}",
+                 "--jq", ".sha"],
+                capture_output=True, text=True, timeout=10,
+            )
+            remote_sha = remote_check.stdout.strip()
+            if remote_sha and remote_sha != indexed_project.git_commit:
+                idx_result["warning"] = (
+                    f"Index commit ({indexed_project.git_commit[:8]}) "
+                    f"differs from remote HEAD ({remote_sha[:8]}). "
+                    f"The clone may not have updated fully. "
+                    f"Try removing {clone_dir} and re-running."
+                )
+        except Exception:
+            pass  # Non-critical check
 
     idx_result["clone_path"] = str(clone_dir)
     idx_result["hint"] = (
