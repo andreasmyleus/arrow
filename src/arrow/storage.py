@@ -1168,14 +1168,26 @@ class Storage:
     ) -> int:
         """Store or update a memory. Returns memory ID."""
         now = time.time()
+        # ON CONFLICT doesn't trigger for NULL project_id,
+        # so check manually.
+        existing = self.conn.execute(
+            "SELECT id FROM memories"
+            " WHERE project_id IS ? AND category = ? AND key = ?",
+            (project_id, category, key),
+        ).fetchone()
+        if existing:
+            self.conn.execute(
+                "UPDATE memories SET content = ?, updated = ?"
+                " WHERE id = ?",
+                (content, now, existing["id"]),
+            )
+            self.conn.commit()
+            return existing["id"]
         self.conn.execute(
             """INSERT INTO memories
                (project_id, category, key, content,
                 created, updated, access_count)
-               VALUES (?, ?, ?, ?, ?, ?, 0)
-               ON CONFLICT(project_id, category, key) DO UPDATE
-               SET content = excluded.content,
-                   updated = excluded.updated""",
+               VALUES (?, ?, ?, ?, ?, ?, 0)""",
             (project_id, category, key, content, now, now),
         )
         self.conn.commit()
