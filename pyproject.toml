@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arrow-mcp"
-version = "0.1.0"
+version = "0.5.0"
 description = "A local, high-performance MCP server that gives Claude Code the same indexing, caching and context management as Cursor IDE."
 readme = "README.md"
 license = "MIT"
@@ -30,10 +30,20 @@ dependencies = [
     "xxhash>=3.4.0",
     "tiktoken>=0.7.0",
     "zstandard>=0.22.0",
+    "usearch>=2.9",
+    "onnxruntime>=1.17.0",
+    "huggingface-hub>=0.20.0",
+    "tokenizers>=0.15.0",
+    "numpy>=1.24.0",
+    "watchdog>=4.0.0",
+    "lz4>=4.3.0",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [project.scripts]
-arrow = "arrow.server:main"
+arrow = "arrow.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/arrow"]

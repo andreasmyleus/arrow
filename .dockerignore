@@ -1,0 +1,14 @@
+.venv/
+.git/
+.claude/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.db
+*.sqlite
+*.usearch
+.DS_Store
+PLAN.md
+.arrow/

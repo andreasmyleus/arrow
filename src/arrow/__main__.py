@@ -1,5 +1,5 @@
 """Allow running as `python -m arrow`."""
 
-from .server import main
+from .cli import main
 
 main()

@@ -1,0 +1,15 @@
+services:
+  arrow:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - arrow-data:/data
+      - ${WORKSPACE_PATH:-.}:/workspace:ro
+    environment:
+      - ARROW_DB_PATH=/data/index.db
+      - ARROW_VECTOR_PATH=/data/vectors.usearch
+    restart: unless-stopped
+
+volumes:
+  arrow-data:

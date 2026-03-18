@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -11,14 +12,13 @@ from typing import Optional
 
 import tiktoken
 
-from .chunker import Chunk, chunk_file, compress_content, detect_language
+from .chunker import chunk_file, compress_content, detect_language
 from .discovery import discover_files
-from .hasher import hash_content, hash_file
+from .hasher import hash_file
 from .storage import Storage
 
 logger = logging.getLogger(__name__)
 
-# Lazy-load tiktoken encoder
 _encoder: Optional[tiktoken.Encoding] = None
 
 
@@ -37,8 +37,34 @@ def count_tokens(text: str) -> int:
 class Indexer:
     """Orchestrates indexing of a codebase."""
 
-    def __init__(self, storage: Storage):
+    def __init__(self, storage: Storage, vector_store=None, embedder=None):
         self.storage = storage
+        self.vector_store = vector_store
+        self.embedder = embedder
+
+    def _embed_chunks_async(self, chunk_ids: list[int], texts: list[str]) -> None:
+        """Generate embeddings in a background thread."""
+        if not self.embedder or not self.vector_store:
+            return
+
+        def _do_embed():
+            try:
+                if not self.embedder.ready:
+                    if not self.embedder.load():
+                        logger.warning("Embedder failed to load, skipping vectors")
+                        return
+
+                logger.info("Generating embeddings for %d chunks...", len(texts))
+                vectors = self.embedder.embed_batch(texts)
+                self.vector_store.add(chunk_ids, vectors)
+                self.vector_store.save()
+                logger.info("Embeddings generated and saved")
+            except Exception:
+                logger.exception("Embedding generation failed")
+
+        thread = threading.Thread(target=_do_embed, daemon=True)
+        thread.start()
+        return thread
 
     def index_codebase(
         self, root: str | Path, force: bool = False
@@ -65,8 +91,9 @@ class Indexer:
             "languages": Counter(),
         }
 
-        # Track which files we've seen (to detect deletions)
         seen_paths: set[str] = set()
+        new_chunk_ids: list[int] = []
+        new_chunk_texts: list[str] = []
 
         for filepath in discover_files(root):
             stats["files_scanned"] += 1
@@ -75,23 +102,21 @@ class Indexer:
 
             try:
                 content_hash = hash_file(str(filepath))
-            except OSError as e:
-                logger.warning(f"Cannot read {rel_path}: {e}")
+            except OSError:
+                logger.warning("Cannot hash %s", rel_path)
                 stats["errors"] += 1
                 continue
 
-            # Check if file needs re-indexing
             if not force:
                 existing = self.storage.get_file(rel_path)
                 if existing and existing.content_hash == content_hash:
                     stats["files_skipped"] += 1
                     continue
 
-            # Read file content
             try:
                 content = filepath.read_text(encoding="utf-8", errors="replace")
-            except OSError as e:
-                logger.warning(f"Cannot read {rel_path}: {e}")
+            except OSError:
+                logger.warning("Cannot read %s", rel_path)
                 stats["errors"] += 1
                 continue
 
@@ -99,16 +124,11 @@ class Indexer:
             if language:
                 stats["languages"][language] += 1
 
-            # Upsert file record
             file_id = self.storage.upsert_file(rel_path, content_hash, language)
-
-            # Delete old chunks for this file
             self.storage.delete_chunks_for_file(file_id)
 
-            # Chunk the file
             chunks = chunk_file(filepath, content)
 
-            # Store chunks
             batch = []
             for chunk in chunks:
                 compressed = compress_content(chunk.content)
@@ -129,9 +149,18 @@ class Indexer:
                 self.storage.insert_chunks_batch(batch)
                 stats["chunks_created"] += len(batch)
 
+                # Collect new chunks for embedding
+                file_chunks = self.storage.get_chunks_for_file(file_id)
+                for fc in file_chunks:
+                    new_chunk_ids.append(fc.id)
+                    new_chunk_texts.append(fc.content_text or "")
+
+            # Extract and store symbols + imports for structure analysis
+            self._extract_structure(file_id, filepath, content, language)
+
             stats["files_indexed"] += 1
 
-        # Remove files that no longer exist
+        # Remove deleted files
         existing_files = self.storage.get_all_files()
         for file_rec in existing_files:
             if file_rec.path not in seen_paths:
@@ -142,7 +171,6 @@ class Indexer:
 
         elapsed = time.time() - start_time
 
-        # Store project metadata
         self.storage.set_project_meta("root_path", str(root))
         self.storage.set_project_meta("last_indexed", str(time.time()))
         self.storage.set_project_meta("index_duration", f"{elapsed:.2f}s")
@@ -151,48 +179,68 @@ class Indexer:
             json.dumps(dict(stats["languages"].most_common())),
         )
 
+        # Generate embeddings in background
+        if new_chunk_ids:
+            embed_thread = self._embed_chunks_async(new_chunk_ids, new_chunk_texts)
+            stats["embedding_status"] = "generating in background"
+        else:
+            stats["embedding_status"] = "no new chunks"
+
         stats["elapsed"] = f"{elapsed:.2f}s"
         stats["languages"] = dict(stats["languages"].most_common())
         return stats
 
-    def generate_project_summary(self, root: Optional[str | Path] = None) -> dict:
-        """Generate a compressed project summary.
+    def _extract_structure(
+        self, file_id: int, filepath: Path, content: str, language: Optional[str]
+    ) -> None:
+        """Extract symbols and imports from a file for structure analysis."""
+        if not language:
+            return
 
-        Returns language distribution, file structure, key modules, and stats.
-        """
+        # Delete old symbols/imports for this file
+        self.storage.conn.execute(
+            "DELETE FROM symbols WHERE file_id = ?", (file_id,)
+        )
+        self.storage.conn.execute(
+            "DELETE FROM imports WHERE source_file = ?", (file_id,)
+        )
+
+        lines = content.splitlines()
+
+        # Extract imports (language-specific patterns)
+        import_lines = _extract_imports(lines, language)
+        for imp in import_lines:
+            self.storage.conn.execute(
+                "INSERT INTO imports (source_file, target_file, symbol) VALUES (?, NULL, ?)",
+                (file_id, imp),
+            )
+
+        # Store symbols from chunks
+        chunks = self.storage.get_chunks_for_file(file_id)
+        for chunk in chunks:
+            if chunk.name and chunk.name != "<anonymous>" and not chunk.name.startswith("chunk_"):
+                self.storage.insert_symbol(
+                    chunk_id=chunk.id,
+                    name=chunk.name,
+                    kind=chunk.kind,
+                    file_id=file_id,
+                )
+
+    def generate_project_summary(self, root: Optional[str | Path] = None) -> dict:
+        """Generate a compressed project summary."""
         db_stats = self.storage.get_stats()
         root_path = root or self.storage.get_project_meta("root_path")
 
-        # Get language distribution
-        languages = db_stats["languages"]
-
-        # Get file structure (top-level directories and their file counts)
         all_files = self.storage.get_all_files()
         dir_counts: Counter = Counter()
         entry_points: list[str] = []
 
         entry_point_names = {
-            "main.py",
-            "app.py",
-            "server.py",
-            "index.js",
-            "index.ts",
-            "main.go",
-            "main.rs",
-            "Main.java",
-            "Program.cs",
-            "main.c",
-            "main.cpp",
-            "lib.rs",
-            "mod.rs",
-            "manage.py",
-            "setup.py",
-            "pyproject.toml",
-            "package.json",
-            "Cargo.toml",
-            "go.mod",
-            "Makefile",
-            "CMakeLists.txt",
+            "main.py", "app.py", "server.py", "index.js", "index.ts",
+            "main.go", "main.rs", "Main.java", "Program.cs",
+            "main.c", "main.cpp", "lib.rs", "manage.py",
+            "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
+            "Makefile", "CMakeLists.txt",
         }
 
         for f in all_files:
@@ -201,26 +249,85 @@ class Indexer:
                 dir_counts[parts[0]] += 1
             else:
                 dir_counts["."] += 1
-
             if Path(f.path).name in entry_point_names:
                 entry_points.append(f.path)
 
-        # Top directories by file count
         top_dirs = [
             {"directory": d, "files": c}
             for d, c in dir_counts.most_common(20)
         ]
 
-        summary = {
+        return {
             "root": str(root_path) if root_path else None,
             "total_files": db_stats["files"],
             "total_chunks": db_stats["chunks"],
             "total_symbols": db_stats["symbols"],
-            "languages": languages,
+            "languages": db_stats["languages"],
             "structure": top_dirs,
             "entry_points": entry_points,
             "last_indexed": self.storage.get_project_meta("last_indexed"),
             "index_duration": self.storage.get_project_meta("index_duration"),
         }
 
-        return summary
+
+def _extract_imports(lines: list[str], language: str) -> list[str]:
+    """Extract import/require statements from source lines."""
+    imports = []
+    for line in lines:
+        stripped = line.strip()
+        if language == "python":
+            if stripped.startswith("import "):
+                mod = stripped.split()[1].split(".")[0]
+                imports.append(mod)
+            elif stripped.startswith("from "):
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    mod = parts[1].split(".")[0]
+                    imports.append(mod)
+        elif language in ("javascript", "typescript", "tsx"):
+            if "require(" in stripped or "import " in stripped:
+                # Extract module name from quotes
+                for q in ('"', "'", "`"):
+                    if q in stripped:
+                        start = stripped.index(q) + 1
+                        end = stripped.index(q, start) if q in stripped[start:] else -1
+                        if end > start:
+                            imports.append(stripped[start:end])
+                        break
+        elif language == "go":
+            if stripped.startswith('"') and stripped.endswith('"'):
+                imports.append(stripped.strip('"'))
+            elif stripped.startswith("import "):
+                if '"' in stripped:
+                    start = stripped.index('"') + 1
+                    end = stripped.rindex('"')
+                    if end > start:
+                        imports.append(stripped[start:end])
+        elif language == "rust":
+            if stripped.startswith("use "):
+                mod = stripped[4:].split("::")[0].rstrip(";").strip()
+                imports.append(mod)
+        elif language == "java":
+            if stripped.startswith("import "):
+                mod = stripped[7:].rstrip(";").strip()
+                imports.append(mod)
+        elif language in ("c", "cpp"):
+            if stripped.startswith("#include"):
+                # Extract header name
+                for delim_start, delim_end in [("<", ">"), ('"', '"')]:
+                    if delim_start in stripped:
+                        start = stripped.index(delim_start) + 1
+                        end = stripped.index(delim_end, start)
+                        if end > start:
+                            imports.append(stripped[start:end])
+                        break
+        elif language == "ruby":
+            if stripped.startswith("require ") or stripped.startswith("require_relative "):
+                for q in ('"', "'"):
+                    if q in stripped:
+                        start = stripped.index(q) + 1
+                        end = stripped.index(q, start) if q in stripped[start:] else -1
+                        if end > start:
+                            imports.append(stripped[start:end])
+                        break
+    return imports

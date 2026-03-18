@@ -253,15 +253,24 @@ class Storage:
 
     def search_fts(self, query: str, limit: int = 50) -> list[tuple[int, float]]:
         """BM25 search via FTS5. Returns list of (chunk_id, bm25_score)."""
-        rows = self.conn.execute(
-            """SELECT rowid, bm25(chunks_fts) as score
-               FROM chunks_fts
-               WHERE chunks_fts MATCH ?
-               ORDER BY score
-               LIMIT ?""",
-            (query, limit),
-        ).fetchall()
-        return [(row["rowid"], row["score"]) for row in rows]
+        # Convert natural language query to FTS5 OR query for better recall
+        fts_query = " OR ".join(
+            word for word in query.split() if word.strip()
+        )
+        if not fts_query:
+            return []
+        try:
+            rows = self.conn.execute(
+                """SELECT rowid, bm25(chunks_fts) as score
+                   FROM chunks_fts
+                   WHERE chunks_fts MATCH ?
+                   ORDER BY score
+                   LIMIT ?""",
+                (fts_query, limit),
+            ).fetchall()
+            return [(row["rowid"], row["score"]) for row in rows]
+        except Exception:
+            return []
 
     def get_chunk_by_id(self, chunk_id: int) -> Optional[ChunkRecord]:
         row = self.conn.execute(
