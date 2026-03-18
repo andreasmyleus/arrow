@@ -1,4 +1,4 @@
-"""SQLite storage layer with WAL mode and FTS5 for BM25 search."""
+"""SQLite storage layer with WAL mode, FTS5, and multi-project support."""
 
 from __future__ import annotations
 
@@ -9,6 +9,25 @@ from pathlib import Path
 from typing import Optional
 
 
+SCHEMA_VERSION = 2
+
+
+@dataclass
+class ProjectRecord:
+    id: int
+    name: str
+    root_path: Optional[str]
+    remote_url: Optional[str]
+    git_branch: Optional[str]
+    git_commit: Optional[str]
+    is_remote: bool
+    last_indexed: Optional[float]
+    index_duration: Optional[str]
+    language_stats: Optional[str]
+    created: float
+    updated: float
+
+
 @dataclass
 class FileRecord:
     id: int
@@ -16,6 +35,7 @@ class FileRecord:
     content_hash: str
     language: Optional[str]
     last_indexed: float
+    project_id: Optional[int] = None
     summary: Optional[str] = None
     summary_hash: Optional[str] = None
 
@@ -32,6 +52,7 @@ class ChunkRecord:
     content_text: str  # plain text for FTS search
     scope_context: str  # e.g. "src/api/auth.py::AuthHandler"
     token_count: int
+    project_id: Optional[int] = None
 
 
 @dataclass
@@ -50,19 +71,37 @@ class ImportRecord:
     symbol: Optional[str]
 
 
-SCHEMA_SQL = """
--- Files and their content hashes
+SCHEMA_V2_SQL = """
+-- Projects
+CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    root_path TEXT,
+    remote_url TEXT,
+    git_branch TEXT,
+    git_commit TEXT,
+    is_remote INTEGER DEFAULT 0,
+    last_indexed REAL,
+    index_duration TEXT,
+    language_stats TEXT,
+    created REAL,
+    updated REAL
+);
+
+-- Files and their content hashes (scoped by project)
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY,
-    path TEXT UNIQUE NOT NULL,
+    path TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     language TEXT,
     last_indexed REAL,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
     summary TEXT,
-    summary_hash TEXT
+    summary_hash TEXT,
+    UNIQUE(project_id, path)
 );
 
--- Code chunks
+-- Code chunks (project_id denormalized for fast search filtering)
 CREATE TABLE IF NOT EXISTS chunks (
     id INTEGER PRIMARY KEY,
     file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
@@ -73,7 +112,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     content BLOB,
     content_text TEXT,
     scope_context TEXT,
-    token_count INTEGER
+    token_count INTEGER,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE
 );
 
 -- FTS5 for BM25 search (uses content_text, not compressed content)
@@ -116,15 +156,15 @@ CREATE TABLE IF NOT EXISTS imports (
     symbol TEXT
 );
 
--- Project metadata
-CREATE TABLE IF NOT EXISTS project (
-    key TEXT PRIMARY KEY,
-    value TEXT,
-    updated REAL
+-- Schema version tracking
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY
 );
 
 -- Indexes for fast lookups
+CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project_id);
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_imports_source ON imports(source_file);
@@ -133,7 +173,7 @@ CREATE INDEX IF NOT EXISTS idx_imports_target ON imports(target_file);
 
 
 class Storage:
-    """SQLite-backed storage with WAL mode and FTS5."""
+    """SQLite-backed storage with WAL mode, FTS5, and multi-project support."""
 
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -153,12 +193,220 @@ class Storage:
         return self._conn
 
     def _init_schema(self) -> None:
-        self.conn.executescript(SCHEMA_SQL)
+        """Initialize or migrate the database schema."""
+        # Check if this is a v1 database (has old 'project' table, no 'projects')
+        tables = {
+            r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        if "project" in tables and "projects" not in tables:
+            self._migrate_v1_to_v2()
+        elif "projects" not in tables:
+            # Fresh database — create v2 schema directly
+            self._conn.executescript(SCHEMA_V2_SQL)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                (SCHEMA_VERSION,)
+            )
+            self._conn.commit()
+        # else: already v2, nothing to do
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Migrate from v1 (single-project) to v2 (multi-project) schema."""
+        conn = self._conn
+
+        # Read old project metadata
+        old_root = None
+        old_meta = {}
+        try:
+            rows = conn.execute("SELECT key, value FROM project").fetchall()
+            for r in rows:
+                old_meta[r[0]] = r[1]
+            old_root = old_meta.get("root_path")
+        except Exception:
+            pass
+
+        now = time.time()
+
+        # Create new tables
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                root_path TEXT,
+                remote_url TEXT,
+                git_branch TEXT,
+                git_commit TEXT,
+                is_remote INTEGER DEFAULT 0,
+                last_indexed REAL,
+                index_duration TEXT,
+                language_stats TEXT,
+                created REAL,
+                updated REAL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY
+            )
+        """)
+
+        # Insert default project from old metadata
+        project_name = Path(old_root).name if old_root else "default"
+        conn.execute(
+            """INSERT INTO projects (name, root_path, last_indexed,
+               index_duration, language_stats, created, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (project_name, old_root,
+             float(old_meta.get("last_indexed", 0)) if old_meta.get("last_indexed") else None,
+             old_meta.get("index_duration"),
+             old_meta.get("language_stats"),
+             now, now),
+        )
+        default_pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        # Migrate files table: add project_id, change UNIQUE constraint
+        conn.execute("ALTER TABLE files ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE")
+        conn.execute(f"UPDATE files SET project_id = {default_pid}")
+
+        # Recreate files table with new UNIQUE constraint
+        conn.execute("""
+            CREATE TABLE files_new (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                language TEXT,
+                last_indexed REAL,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                summary TEXT,
+                summary_hash TEXT,
+                UNIQUE(project_id, path)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO files_new (id, path, content_hash, language, last_indexed, project_id, summary, summary_hash)
+            SELECT id, path, content_hash, language, last_indexed, project_id, summary, summary_hash FROM files
+        """)
+        conn.execute("DROP TABLE files")
+        conn.execute("ALTER TABLE files_new RENAME TO files")
+
+        # Add project_id to chunks
+        conn.execute("ALTER TABLE chunks ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE")
+        conn.execute(f"UPDATE chunks SET project_id = {default_pid}")
+
+        # Rebuild FTS5
+        try:
+            conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+        except Exception:
+            pass
+
+        # Create new indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project_id)")
+
+        # Drop old project table
+        conn.execute("DROP TABLE IF EXISTS project")
+
+        # Set schema version
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+            (SCHEMA_VERSION,)
+        )
+        conn.commit()
 
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    # -- Project operations --
+
+    def create_project(
+        self,
+        name: str,
+        root_path: Optional[str] = None,
+        remote_url: Optional[str] = None,
+        git_branch: Optional[str] = None,
+        git_commit: Optional[str] = None,
+        is_remote: bool = False,
+    ) -> int:
+        """Create or update a project. Returns project ID."""
+        now = time.time()
+        self.conn.execute(
+            """INSERT INTO projects (name, root_path, remote_url, git_branch, git_commit,
+                   is_remote, created, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                   root_path = COALESCE(excluded.root_path, root_path),
+                   remote_url = COALESCE(excluded.remote_url, remote_url),
+                   git_branch = COALESCE(excluded.git_branch, git_branch),
+                   git_commit = COALESCE(excluded.git_commit, git_commit),
+                   updated = excluded.updated""",
+            (name, root_path, remote_url, git_branch, git_commit, int(is_remote), now, now),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM projects WHERE name = ?", (name,)
+        ).fetchone()
+        return row["id"]
+
+    def get_project(self, project_id: int) -> Optional[ProjectRecord]:
+        row = self.conn.execute(
+            "SELECT * FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        return self._row_to_project(row) if row else None
+
+    def get_project_by_name(self, name: str) -> Optional[ProjectRecord]:
+        row = self.conn.execute(
+            "SELECT * FROM projects WHERE name = ?", (name,)
+        ).fetchone()
+        return self._row_to_project(row) if row else None
+
+    def get_project_by_root(self, root_path: str) -> Optional[ProjectRecord]:
+        row = self.conn.execute(
+            "SELECT * FROM projects WHERE root_path = ?", (root_path,)
+        ).fetchone()
+        return self._row_to_project(row) if row else None
+
+    def list_projects(self) -> list[ProjectRecord]:
+        rows = self.conn.execute(
+            "SELECT * FROM projects ORDER BY updated DESC"
+        ).fetchall()
+        return [self._row_to_project(r) for r in rows]
+
+    def update_project_git(
+        self, project_id: int, branch: Optional[str], commit: Optional[str]
+    ) -> None:
+        self.conn.execute(
+            """UPDATE projects SET git_branch = ?, git_commit = ?, updated = ?
+               WHERE id = ?""",
+            (branch, commit, time.time(), project_id),
+        )
+        self.conn.commit()
+
+    def update_project_indexed(
+        self, project_id: int, duration: str, language_stats: str
+    ) -> None:
+        self.conn.execute(
+            """UPDATE projects SET last_indexed = ?, index_duration = ?,
+               language_stats = ?, updated = ?
+               WHERE id = ?""",
+            (time.time(), duration, language_stats, time.time(), project_id),
+        )
+        self.conn.commit()
+
+    def delete_project(self, project_id: int) -> None:
+        """Delete a project and all its data (cascading)."""
+        self.conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        self.conn.commit()
+
+    def _row_to_project(self, row: sqlite3.Row) -> ProjectRecord:
+        d = dict(row)
+        d["is_remote"] = bool(d.get("is_remote", 0))
+        return ProjectRecord(**d)
 
     # -- File operations --
 
@@ -170,10 +418,16 @@ class Storage:
             return None
         return FileRecord(**dict(row))
 
-    def get_file(self, path: str) -> Optional[FileRecord]:
-        row = self.conn.execute(
-            "SELECT * FROM files WHERE path = ?", (path,)
-        ).fetchone()
+    def get_file(self, path: str, project_id: Optional[int] = None) -> Optional[FileRecord]:
+        if project_id is not None:
+            row = self.conn.execute(
+                "SELECT * FROM files WHERE path = ? AND project_id = ?",
+                (path, project_id),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM files WHERE path = ?", (path,)
+            ).fetchone()
         if row is None:
             return None
         return FileRecord(**dict(row))
@@ -183,30 +437,47 @@ class Storage:
         path: str,
         content_hash: str,
         language: Optional[str] = None,
+        project_id: Optional[int] = None,
     ) -> int:
         now = time.time()
         self.conn.execute(
-            """INSERT INTO files (path, content_hash, language, last_indexed)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(path) DO UPDATE SET
+            """INSERT INTO files (path, content_hash, language, last_indexed, project_id)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(project_id, path) DO UPDATE SET
                    content_hash = excluded.content_hash,
                    language = excluded.language,
                    last_indexed = excluded.last_indexed""",
-            (path, content_hash, language, now),
+            (path, content_hash, language, now, project_id),
         )
         self.conn.commit()
-        # Return the file id
-        row = self.conn.execute(
-            "SELECT id FROM files WHERE path = ?", (path,)
-        ).fetchone()
+        if project_id is not None:
+            row = self.conn.execute(
+                "SELECT id FROM files WHERE path = ? AND project_id = ?",
+                (path, project_id),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT id FROM files WHERE path = ?", (path,)
+            ).fetchone()
         return row["id"]
 
-    def delete_file(self, path: str) -> None:
-        self.conn.execute("DELETE FROM files WHERE path = ?", (path,))
+    def delete_file(self, path: str, project_id: Optional[int] = None) -> None:
+        if project_id is not None:
+            self.conn.execute(
+                "DELETE FROM files WHERE path = ? AND project_id = ?",
+                (path, project_id),
+            )
+        else:
+            self.conn.execute("DELETE FROM files WHERE path = ?", (path,))
         self.conn.commit()
 
-    def get_all_files(self) -> list[FileRecord]:
-        rows = self.conn.execute("SELECT * FROM files").fetchall()
+    def get_all_files(self, project_id: Optional[int] = None) -> list[FileRecord]:
+        if project_id is not None:
+            rows = self.conn.execute(
+                "SELECT * FROM files WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM files").fetchall()
         return [FileRecord(**dict(r)) for r in rows]
 
     # -- Chunk operations --
@@ -225,23 +496,25 @@ class Storage:
         content_text: str,
         scope_context: str,
         token_count: int,
+        project_id: Optional[int] = None,
     ) -> int:
         cur = self.conn.execute(
             """INSERT INTO chunks
                (file_id, name, kind, start_line, end_line,
-                content, content_text, scope_context, token_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                content, content_text, scope_context, token_count, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (file_id, name, kind, start_line, end_line,
-             content, content_text, scope_context, token_count),
+             content, content_text, scope_context, token_count, project_id),
         )
         return cur.lastrowid
 
     def insert_chunks_batch(self, chunks: list[tuple]) -> None:
+        """Insert chunks in batch. Tuples must have 10 elements (including project_id)."""
         self.conn.executemany(
             """INSERT INTO chunks
                (file_id, name, kind, start_line, end_line,
-                content, content_text, scope_context, token_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                content, content_text, scope_context, token_count, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             chunks,
         )
 
@@ -251,23 +524,37 @@ class Storage:
         ).fetchall()
         return [ChunkRecord(**dict(r)) for r in rows]
 
-    def search_fts(self, query: str, limit: int = 50) -> list[tuple[int, float]]:
+    def search_fts(
+        self, query: str, limit: int = 50, project_id: Optional[int] = None
+    ) -> list[tuple[int, float]]:
         """BM25 search via FTS5. Returns list of (chunk_id, bm25_score)."""
-        # Convert natural language query to FTS5 OR query for better recall
         fts_query = " OR ".join(
             word for word in query.split() if word.strip()
         )
         if not fts_query:
             return []
         try:
-            rows = self.conn.execute(
-                """SELECT rowid, bm25(chunks_fts) as score
-                   FROM chunks_fts
-                   WHERE chunks_fts MATCH ?
-                   ORDER BY score
-                   LIMIT ?""",
-                (fts_query, limit),
-            ).fetchall()
+            if project_id is not None:
+                # Join with chunks table to filter by project
+                rows = self.conn.execute(
+                    """SELECT cf.rowid, bm25(chunks_fts) as score
+                       FROM chunks_fts cf
+                       JOIN chunks c ON c.id = cf.rowid
+                       WHERE cf.chunks_fts MATCH ?
+                       AND c.project_id = ?
+                       ORDER BY score
+                       LIMIT ?""",
+                    (fts_query, project_id, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    """SELECT rowid, bm25(chunks_fts) as score
+                       FROM chunks_fts
+                       WHERE chunks_fts MATCH ?
+                       ORDER BY score
+                       LIMIT ?""",
+                    (fts_query, limit),
+                ).fetchall()
             return [(row["rowid"], row["score"]) for row in rows]
         except Exception:
             return []
@@ -301,49 +588,87 @@ class Storage:
         return cur.lastrowid
 
     def search_symbols(
-        self, name: str, kind: Optional[str] = None, limit: int = 20
+        self, name: str, kind: Optional[str] = None, limit: int = 20,
+        project_id: Optional[int] = None,
     ) -> list[SymbolRecord]:
-        if kind and kind != "any":
-            rows = self.conn.execute(
-                """SELECT * FROM symbols
-                   WHERE name LIKE ? AND kind = ?
-                   ORDER BY name LIMIT ?""",
-                (f"{name}%", kind, limit),
-            ).fetchall()
+        if project_id is not None:
+            if kind and kind != "any":
+                rows = self.conn.execute(
+                    """SELECT s.* FROM symbols s
+                       JOIN files f ON f.id = s.file_id
+                       WHERE s.name LIKE ? AND s.kind = ? AND f.project_id = ?
+                       ORDER BY s.name LIMIT ?""",
+                    (f"{name}%", kind, project_id, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    """SELECT s.* FROM symbols s
+                       JOIN files f ON f.id = s.file_id
+                       WHERE s.name LIKE ? AND f.project_id = ?
+                       ORDER BY s.name LIMIT ?""",
+                    (f"{name}%", project_id, limit),
+                ).fetchall()
         else:
-            rows = self.conn.execute(
-                """SELECT * FROM symbols
-                   WHERE name LIKE ?
-                   ORDER BY name LIMIT ?""",
-                (f"{name}%", limit),
-            ).fetchall()
+            if kind and kind != "any":
+                rows = self.conn.execute(
+                    """SELECT * FROM symbols
+                       WHERE name LIKE ? AND kind = ?
+                       ORDER BY name LIMIT ?""",
+                    (f"{name}%", kind, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    """SELECT * FROM symbols
+                       WHERE name LIKE ?
+                       ORDER BY name LIMIT ?""",
+                    (f"{name}%", limit),
+                ).fetchall()
         return [SymbolRecord(**dict(r)) for r in rows]
 
-    # -- Project metadata --
+    # -- Project metadata (legacy compat) --
 
     def set_project_meta(self, key: str, value: str) -> None:
-        self.conn.execute(
-            """INSERT INTO project (key, value, updated)
-               VALUES (?, ?, ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated = excluded.updated""",
-            (key, value, time.time()),
-        )
-        self.conn.commit()
+        """Legacy method — stores in first project's metadata or ignores."""
+        pass
 
     def get_project_meta(self, key: str) -> Optional[str]:
-        row = self.conn.execute(
-            "SELECT value FROM project WHERE key = ?", (key,)
-        ).fetchone()
-        return row["value"] if row else None
+        """Legacy method — returns from first project's data."""
+        if key == "root_path":
+            projects = self.list_projects()
+            if projects:
+                return projects[0].root_path
+        return None
 
-    def get_stats(self) -> dict:
-        """Get index statistics."""
-        file_count = self.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        chunk_count = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        symbol_count = self.conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
-        languages = self.conn.execute(
-            "SELECT language, COUNT(*) as cnt FROM files WHERE language IS NOT NULL GROUP BY language ORDER BY cnt DESC"
-        ).fetchall()
+    # -- Stats --
+
+    def get_stats(self, project_id: Optional[int] = None) -> dict:
+        """Get index statistics, optionally scoped to a project."""
+        if project_id is not None:
+            file_count = self.conn.execute(
+                "SELECT COUNT(*) FROM files WHERE project_id = ?", (project_id,)
+            ).fetchone()[0]
+            chunk_count = self.conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE project_id = ?", (project_id,)
+            ).fetchone()[0]
+            symbol_count = self.conn.execute(
+                """SELECT COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id
+                   WHERE f.project_id = ?""", (project_id,)
+            ).fetchone()[0]
+            languages = self.conn.execute(
+                """SELECT language, COUNT(*) as cnt FROM files
+                   WHERE language IS NOT NULL AND project_id = ?
+                   GROUP BY language ORDER BY cnt DESC""",
+                (project_id,),
+            ).fetchall()
+        else:
+            file_count = self.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            chunk_count = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            symbol_count = self.conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+            languages = self.conn.execute(
+                """SELECT language, COUNT(*) as cnt FROM files
+                   WHERE language IS NOT NULL
+                   GROUP BY language ORDER BY cnt DESC"""
+            ).fetchall()
         return {
             "files": file_count,
             "chunks": chunk_count,

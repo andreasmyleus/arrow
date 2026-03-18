@@ -44,7 +44,6 @@ class TestChunkerEdgeCases:
         content = "def foo(\n    # incomplete"
         f.write_text(content)
         chunks = chunk_file(f, content)
-        # Should still produce chunks (module-level fallback)
         assert len(chunks) >= 1
 
     def test_very_long_function(self, tmp_path):
@@ -209,13 +208,12 @@ class TestDiscoveryEdgeCases:
         real = tmp_path / "real"
         real.mkdir()
         (real / "file.py").write_text("x = 1")
-        # Just test that discover_files doesn't crash on the dir
         files = list(discover_files(tmp_path))
         assert any(f.name == "file.py" for f in files)
 
     def test_large_file_skipped(self, tmp_path):
         large = tmp_path / "big.py"
-        large.write_text("x" * 2_000_000)  # 2MB > 1MB limit
+        large.write_text("x" * 2_000_000)
         files = list(discover_files(tmp_path))
         assert not any(f.name == "big.py" for f in files)
 
@@ -231,14 +229,14 @@ class TestDiscoveryEdgeCases:
 
 class TestStorageEdgeCases:
     def test_fts_special_characters(self, db):
-        fid = db.upsert_file("test.py", "abc", "python")
+        pid = db.create_project("test", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc", "python", project_id=pid)
         db.insert_chunk(
             fid, "my-func", "function", 1, 5,
             b"x", "def my_func(): pass",
-            "test.py::my-func", 10,
+            "test.py::my-func", 10, project_id=pid,
         )
         db.commit()
-        # Should not crash on special chars
         results = db.search_fts("my-func", limit=5)
         assert isinstance(results, list)
 
@@ -251,18 +249,17 @@ class TestStorageEdgeCases:
         assert isinstance(results, list)
 
     def test_concurrent_reads(self, db):
-        """SQLite WAL should handle concurrent reads."""
-        fid = db.upsert_file("test.py", "abc", "python")
+        pid = db.create_project("test", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc", "python", project_id=pid)
         db.insert_chunk(
             fid, "func", "function", 1, 3,
-            b"x", "def func(): pass", "test.py::func", 5,
+            b"x", "def func(): pass", "test.py::func", 5, project_id=pid,
         )
         db.commit()
 
-        # Multiple reads shouldn't deadlock
         for _ in range(100):
             db.search_fts("func", limit=5)
-            db.get_file("test.py")
+            db.get_file("test.py", project_id=pid)
             db.get_stats()
 
     def test_get_nonexistent_file(self, db):
@@ -338,6 +335,5 @@ class TestSearchEdgeCases:
         idx = Indexer(db)
         idx.index_codebase(tmp_path)
         searcher = HybridSearcher(db)
-        # Should not crash
         results = searcher.search("__init__", limit=5)
         assert isinstance(results, list)

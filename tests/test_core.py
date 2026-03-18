@@ -27,7 +27,8 @@ def db():
     storage = Storage(path)
     yield storage
     storage.close()
-    os.unlink(path)
+    if os.path.exists(path):
+        os.unlink(path)
 
 
 @pytest.fixture
@@ -142,40 +143,68 @@ class TestDiscovery:
 
 class TestStorage:
     def test_upsert_and_get_file(self, db):
-        fid = db.upsert_file("test.py", "abc123", "python")
+        # Create a project first
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc123", "python", project_id=pid)
         assert fid > 0
-        rec = db.get_file("test.py")
+        rec = db.get_file("test.py", project_id=pid)
         assert rec is not None
         assert rec.content_hash == "abc123"
         assert rec.language == "python"
+        assert rec.project_id == pid
 
     def test_upsert_updates(self, db):
-        db.upsert_file("test.py", "hash1", "python")
-        db.upsert_file("test.py", "hash2", "python")
-        rec = db.get_file("test.py")
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        db.upsert_file("test.py", "hash1", "python", project_id=pid)
+        db.upsert_file("test.py", "hash2", "python", project_id=pid)
+        rec = db.get_file("test.py", project_id=pid)
         assert rec.content_hash == "hash2"
 
     def test_delete_file(self, db):
-        db.upsert_file("test.py", "abc", "python")
-        db.delete_file("test.py")
-        assert db.get_file("test.py") is None
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        db.upsert_file("test.py", "abc", "python", project_id=pid)
+        db.delete_file("test.py", project_id=pid)
+        assert db.get_file("test.py", project_id=pid) is None
 
     def test_insert_and_search_fts(self, db):
-        fid = db.upsert_file("test.py", "abc", "python")
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc", "python", project_id=pid)
         db.insert_chunk(
             fid, "my_function", "function", 1, 5,
             b"compressed", "def my_function(): pass",
-            "test.py::my_function", 10,
+            "test.py::my_function", 10, project_id=pid,
         )
         db.commit()
         results = db.search_fts("my_function", limit=5)
         assert len(results) > 0
 
+    def test_search_fts_project_scoped(self, db):
+        pid1 = db.create_project("project-a", root_path="/tmp/a")
+        pid2 = db.create_project("project-b", root_path="/tmp/b")
+        fid1 = db.upsert_file("test.py", "abc", "python", project_id=pid1)
+        fid2 = db.upsert_file("test.py", "def", "python", project_id=pid2)
+        db.insert_chunk(
+            fid1, "func_a", "function", 1, 5,
+            b"x", "def func_a(): pass", "test.py::func_a", 10, project_id=pid1,
+        )
+        db.insert_chunk(
+            fid2, "func_b", "function", 1, 5,
+            b"x", "def func_b(): pass", "test.py::func_b", 10, project_id=pid2,
+        )
+        db.commit()
+
+        # Scoped to project 1
+        results = db.search_fts("func", limit=10, project_id=pid1)
+        chunk_ids = [cid for cid, _ in results]
+        chunks = db.get_chunks_by_ids(chunk_ids)
+        assert all(c.project_id == pid1 for c in chunks)
+
     def test_search_symbols(self, db):
-        fid = db.upsert_file("test.py", "abc", "python")
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc", "python", project_id=pid)
         cid = db.insert_chunk(
             fid, "foo", "function", 1, 3,
-            b"x", "def foo(): pass", "test.py::foo", 5,
+            b"x", "def foo(): pass", "test.py::foo", 5, project_id=pid,
         )
         db.insert_symbol(cid, "foo", "function", fid)
         db.commit()
@@ -183,14 +212,80 @@ class TestStorage:
         assert len(syms) == 1
         assert syms[0].name == "foo"
 
-    def test_project_meta(self, db):
+    def test_project_crud(self, db):
+        pid = db.create_project(
+            "org/repo", root_path="/tmp/repo",
+            git_branch="main", git_commit="abc123",
+        )
+        assert pid > 0
+
+        proj = db.get_project(pid)
+        assert proj.name == "org/repo"
+        assert proj.git_branch == "main"
+
+        proj2 = db.get_project_by_name("org/repo")
+        assert proj2.id == pid
+
+        proj3 = db.get_project_by_root("/tmp/repo")
+        assert proj3.id == pid
+
+        projects = db.list_projects()
+        assert len(projects) >= 1
+
+        db.update_project_git(pid, "develop", "def456")
+        proj = db.get_project(pid)
+        assert proj.git_branch == "develop"
+        assert proj.git_commit == "def456"
+
+    def test_delete_project_cascades(self, db):
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc", "python", project_id=pid)
+        db.insert_chunk(
+            fid, "func", "function", 1, 3,
+            b"x", "def func(): pass", "test.py::func", 5, project_id=pid,
+        )
+        db.commit()
+        assert db.get_stats(project_id=pid)["files"] == 1
+
+        db.delete_project(pid)
+        assert db.get_project(pid) is None
+        assert db.get_stats(project_id=pid)["files"] == 0
+
+    def test_same_path_different_projects(self, db):
+        pid1 = db.create_project("project-a", root_path="/tmp/a")
+        pid2 = db.create_project("project-b", root_path="/tmp/b")
+
+        fid1 = db.upsert_file("main.py", "hash1", "python", project_id=pid1)
+        fid2 = db.upsert_file("main.py", "hash2", "python", project_id=pid2)
+        assert fid1 != fid2
+
+        rec1 = db.get_file("main.py", project_id=pid1)
+        rec2 = db.get_file("main.py", project_id=pid2)
+        assert rec1.content_hash == "hash1"
+        assert rec2.content_hash == "hash2"
+
+    def test_project_meta_legacy(self, db):
+        # Legacy set_project_meta should not crash
         db.set_project_meta("root", "/tmp/test")
-        assert db.get_project_meta("root") == "/tmp/test"
 
     def test_stats(self, db):
         stats = db.get_stats()
         assert stats["files"] == 0
         assert stats["chunks"] == 0
+
+    def test_stats_project_scoped(self, db):
+        pid1 = db.create_project("project-a", root_path="/tmp/a")
+        pid2 = db.create_project("project-b", root_path="/tmp/b")
+        db.upsert_file("a.py", "h1", "python", project_id=pid1)
+        db.upsert_file("b.py", "h2", "python", project_id=pid2)
+
+        stats1 = db.get_stats(project_id=pid1)
+        stats2 = db.get_stats(project_id=pid2)
+        stats_all = db.get_stats()
+
+        assert stats1["files"] == 1
+        assert stats2["files"] == 1
+        assert stats_all["files"] == 2
 
 
 # --- Indexer tests ---
@@ -202,6 +297,7 @@ class TestIndexer:
         result = idx.index_codebase(sample_dir)
         assert result["files_indexed"] > 0
         assert result["chunks_created"] > 0
+        assert "project_id" in result
 
     def test_incremental_indexing(self, db, sample_dir):
         idx = Indexer(db)
@@ -225,13 +321,77 @@ class TestIndexer:
 
     def test_project_summary(self, db, sample_dir):
         idx = Indexer(db)
-        idx.index_codebase(sample_dir)
-        summary = idx.generate_project_summary()
+        result = idx.index_codebase(sample_dir)
+        summary = idx.generate_project_summary(project_id=result["project_id"])
         assert summary["total_files"] > 0
 
     def test_count_tokens(self):
         tokens = count_tokens("hello world")
         assert tokens > 0
+
+    def test_multi_project_isolation(self, db, tmp_path):
+        """Indexing two projects doesn't interfere with each other."""
+        dir_a = tmp_path / "project_a"
+        dir_b = tmp_path / "project_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "a.py").write_text("def func_a(): pass")
+        (dir_b / "b.py").write_text("def func_b(): pass")
+
+        idx = Indexer(db)
+        result_a = idx.index_codebase(dir_a)
+        result_b = idx.index_codebase(dir_b)
+
+        assert result_a["project_id"] != result_b["project_id"]
+
+        # Each project should have exactly 1 file
+        files_a = db.get_all_files(project_id=result_a["project_id"])
+        files_b = db.get_all_files(project_id=result_b["project_id"])
+        assert len(files_a) == 1
+        assert len(files_b) == 1
+        assert files_a[0].path == "a.py"
+        assert files_b[0].path == "b.py"
+
+    def test_deleted_files_scoped_to_project(self, db, tmp_path):
+        """Deleting files in one project doesn't affect another."""
+        dir_a = tmp_path / "project_a"
+        dir_b = tmp_path / "project_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "shared.py").write_text("x = 1")
+        (dir_b / "shared.py").write_text("y = 2")
+
+        idx = Indexer(db)
+        result_a = idx.index_codebase(dir_a)
+        result_b = idx.index_codebase(dir_b)
+
+        # Delete shared.py from project_a
+        (dir_a / "shared.py").unlink()
+        result_a2 = idx.index_codebase(dir_a)
+        assert result_a2["files_removed"] == 1
+
+        # project_b should still have its shared.py
+        files_b = db.get_all_files(project_id=result_b["project_id"])
+        assert len(files_b) == 1
+
+    def test_index_remote_files(self, db):
+        idx = Indexer(db)
+        result = idx.index_remote_files(
+            owner="testorg",
+            repo="testrepo",
+            branch="main",
+            files=[
+                {"path": "src/main.py", "content": "def main(): pass"},
+                {"path": "src/utils.py", "content": "def add(a, b): return a + b"},
+            ],
+        )
+        assert result["files_indexed"] == 2
+        assert result["project_name"] == "testorg/testrepo"
+
+        proj = db.get_project_by_name("testorg/testrepo")
+        assert proj is not None
+        assert proj.is_remote
+        assert proj.git_branch == "main"
 
 
 # --- Search tests ---
@@ -252,6 +412,31 @@ class TestSearch:
         results = searcher.search("add multiply", limit=5)
         assert len(results) > 0
 
+    def test_hybrid_search_project_scoped(self, db, tmp_path):
+        dir_a = tmp_path / "project_a"
+        dir_b = tmp_path / "project_b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "a.py").write_text("def alpha_func(): pass")
+        (dir_b / "b.py").write_text("def beta_func(): pass")
+
+        idx = Indexer(db)
+        result_a = idx.index_codebase(dir_a)
+        result_b = idx.index_codebase(dir_b)
+
+        searcher = HybridSearcher(db)
+
+        # Search all
+        all_results = searcher.search("func", limit=10)
+        assert len(all_results) >= 2
+
+        # Search scoped to project_a
+        results_a = searcher.search(
+            "func", limit=10, project_id=result_a["project_id"]
+        )
+        for r in results_a:
+            assert r.project_name == dir_a.name
+
     def test_get_context(self, db, sample_dir):
         idx = Indexer(db)
         idx.index_codebase(sample_dir)
@@ -259,3 +444,11 @@ class TestSearch:
         ctx = searcher.get_context("helper class", token_budget=1000)
         assert ctx["tokens_used"] <= 1000
         assert len(ctx["chunks"]) > 0
+
+    def test_get_context_has_project_field(self, db, sample_dir):
+        idx = Indexer(db)
+        idx.index_codebase(sample_dir)
+        searcher = HybridSearcher(db)
+        ctx = searcher.get_context("main function", token_budget=4000)
+        if ctx["chunks"]:
+            assert "project" in ctx["chunks"][0]

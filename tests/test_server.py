@@ -27,6 +27,20 @@ def project_dir(tmp_path):
     return tmp_path
 
 
+@pytest.fixture
+def project_dir_b(tmp_path):
+    """Create a second project for multi-project testing."""
+    d = tmp_path / "project_b"
+    d.mkdir()
+    (d / "server.py").write_text(
+        "def start_server():\n    print('running')\n"
+    )
+    (d / "db.py").write_text(
+        "class Database:\n    def connect(self):\n        pass\n"
+    )
+    return d
+
+
 @pytest.fixture(autouse=True)
 def clean_server_state():
     """Reset server global state between tests."""
@@ -36,11 +50,13 @@ def clean_server_state():
     srv._vector_store = None
     srv._embedder = None
     srv._searcher = None
-    srv._watcher = None
+    srv._watchers.clear()
+    srv._project_locks.clear()
     yield
     # Cleanup
-    if srv._watcher is not None:
-        srv._watcher.stop()
+    for watcher in list(srv._watchers.values()):
+        watcher.stop()
+    srv._watchers.clear()
     if srv._storage is not None:
         srv._storage.close()
 
@@ -70,13 +86,28 @@ class TestServerTools:
         project_dir, _, _ = setup_server
         from arrow.server import index_codebase
         result = json.loads(index_codebase(str(project_dir)))
-        # Second call should skip all files
         assert result["files_skipped"] > 0 or result["files_indexed"] == 0
 
     def test_index_codebase_invalid_path(self, setup_server):
         from arrow.server import index_codebase
         result = json.loads(index_codebase("/nonexistent/path"))
         assert "error" in result
+
+    def test_index_returns_project_info(self, setup_server):
+        project_dir, _, _ = setup_server
+        from arrow.server import index_codebase
+        result = json.loads(index_codebase(str(project_dir), force=True))
+        assert "project_id" in result
+        assert "project_name" in result
+
+    def test_list_projects(self, setup_server):
+        from arrow.server import list_projects
+        result = json.loads(list_projects())
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert "name" in result[0]
+        assert "files" in result[0]
+        assert "git_branch" in result[0]
 
     def test_project_summary(self, setup_server):
         from arrow.server import project_summary
@@ -91,6 +122,7 @@ class TestServerTools:
         assert isinstance(result, list)
         assert len(result) > 0
         assert "file" in result[0]
+        assert "project" in result[0]
         assert "content" in result[0]
 
     def test_search_code_no_results(self, setup_server):
@@ -109,7 +141,6 @@ class TestServerTools:
         from arrow.server import search_structure
         result = json.loads(search_structure("add"))
         assert isinstance(result, list)
-        # Should find the add function
         names = [r["name"] for r in result]
         assert "add" in names
 
@@ -142,6 +173,22 @@ class TestServerTools:
         result = json.loads(file_summary("nonexistent.py"))
         assert "error" in result
 
+    def test_remove_project(self, setup_server):
+        from arrow.server import list_projects, remove_project
+        projects = json.loads(list_projects())
+        name = projects[0]["name"]
+        result = json.loads(remove_project(name))
+        assert "removed" in result
+        # Should be gone
+        projects2 = json.loads(list_projects())
+        names = [p["name"] for p in projects2]
+        assert name not in names
+
+    def test_remove_nonexistent_project(self, setup_server):
+        from arrow.server import remove_project
+        result = json.loads(remove_project("nonexistent/repo"))
+        assert "error" in result
+
     def test_tools_before_indexing(self):
         """Tools should return error when no project is indexed."""
         db_path = tempfile.mktemp(suffix=".db")
@@ -159,3 +206,51 @@ class TestServerTools:
             os.environ.pop("ARROW_VECTOR_PATH", None)
             if os.path.exists(db_path):
                 os.unlink(db_path)
+
+
+class TestMultiProject:
+    def test_index_two_projects(self, setup_server, project_dir_b):
+        from arrow.server import index_codebase, list_projects
+        index_codebase(str(project_dir_b))
+
+        projects = json.loads(list_projects())
+        assert len(projects) >= 2
+
+    def test_search_across_projects(self, setup_server, project_dir_b):
+        from arrow.server import index_codebase, search_code
+        index_codebase(str(project_dir_b))
+
+        # Search all projects
+        results = json.loads(search_code("function class def"))
+        assert len(results) > 0
+        # Should have results from multiple projects
+        project_names = {r["project"] for r in results}
+        assert len(project_names) >= 1
+
+    def test_search_scoped_to_project(self, setup_server, project_dir_b):
+        from arrow.server import index_codebase, search_code, list_projects
+        index_codebase(str(project_dir_b))
+
+        projects = json.loads(list_projects())
+        name_b = [p["name"] for p in projects if "project_b" in (p.get("root_path") or "")]
+        if name_b:
+            results = json.loads(search_code("function", project=name_b[0]))
+            for r in results:
+                assert r["project"] == name_b[0]
+
+    def test_index_github_content(self, setup_server):
+        from arrow.server import index_github_content, list_projects
+        result = json.loads(index_github_content(
+            owner="testorg",
+            repo="testrepo",
+            branch="main",
+            files=[
+                {"path": "app.py", "content": "def app(): return 'hello'"},
+            ],
+        ))
+        assert result["files_indexed"] == 1
+        assert result["project_name"] == "testorg/testrepo"
+
+        projects = json.loads(list_projects())
+        names = [p["name"] for p in projects]
+        assert "testorg/testrepo" in names

@@ -4,13 +4,17 @@ A local, high-performance MCP server that gives Claude Code intelligent code ind
 
 ## What it does
 
-Arrow pre-indexes your codebase using tree-sitter AST parsing, then serves relevant code chunks to Claude Code via MCP tools. Instead of reading entire files, Claude gets exactly the code it needs, using a fraction of the context window.
+Arrow pre-indexes your codebases using tree-sitter AST parsing, then serves relevant code chunks to Claude Code via MCP tools. Instead of reading entire files, Claude gets exactly the code it needs, using a fraction of the context window.
 
+- **Multi-repo support** — index all your local repos in parallel, organized by `org/repo`, in one shared database
+- **Git-aware** — tracks branch + HEAD commit per project, auto-updates when commits change
+- **GitHub remote caching** — cache content from GitHub MCP reads for cross-project search
 - **AST-based chunking** — tree-sitter parses code into semantic units (functions, classes) across 64+ languages
 - **Hybrid search** — BM25 full-text (FTS5) + semantic vector search (usearch + ONNX embeddings)
 - **Incremental indexing** — xxHash3 content-hashing ensures only changed files are re-indexed
 - **Token-budget aware** — `get_context` returns the most relevant code within an exact token limit
-- **Automatic re-indexing** — watchdog monitors file changes and re-indexes in the background
+- **Automatic re-indexing** — watchdog monitors file changes per-project and re-indexes in the background
+- **Concurrent-safe** — SQLite WAL mode + per-project write locks for multiple Claude Code sessions / subagents
 - **100% local** — no cloud APIs, no external dependencies, runs on CPU
 
 ## Performance
@@ -47,23 +51,23 @@ Real-world coding tasks on Arrow's own codebase (22 files, ~4k lines). Arrow use
 
 ### Comprehensive Benchmark (110 queries, 10 complexity tiers)
 
-Tested across query types ranging from simple symbol lookups to broad architectural reviews. All queries use a 4000-token budget.
+Tested across query types ranging from simple symbol lookups to broad architectural reviews. All queries use a 4000-token budget. Benchmarked on Arrow's own codebase (14 files, 47 chunks).
 
-| Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings |
-|-----------------|---------|-------------|-------------------|---------|
-| Symbol lookup | 15 | 51,962 | 258,403 | 80% |
-| Method lookup | 15 | 52,071 | 169,984 | 69% |
-| Single concept | 10 | 25,142 | 116,988 | 79% |
-| Two concepts | 10 | 39,899 | 154,541 | 74% |
-| How-does-X-work | 10 | 35,837 | 226,538 | 84% |
-| Cross-file tracing | 10 | 31,899 | 185,968 | 83% |
-| Debugging | 10 | 35,340 | 213,882 | 84% |
-| Implementation planning | 10 | 39,885 | 242,264 | 84% |
-| Architecture review | 10 | 39,669 | 609,049 | 93% |
-| Broad / exploratory | 10 | 39,741 | 706,405 | 94% |
-| **Total** | **110** | **391,445** | **2,884,022** | **86%** |
+| Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings | Avg Time |
+|-----------------|---------|-------------|-------------------|---------|----------|
+| Symbol lookup | 15 | 57,468 | 302,607 | 81% | 0.4ms |
+| Method lookup | 15 | 42,768 | 190,510 | 78% | 0.4ms |
+| Single concept | 10 | 25,763 | 133,193 | 81% | 0.4ms |
+| Two concepts | 10 | 39,413 | 173,685 | 77% | 0.5ms |
+| How-does-X-work | 10 | 35,929 | 248,423 | 86% | 0.9ms |
+| Cross-file tracing | 10 | 31,761 | 205,294 | 85% | 0.9ms |
+| Debugging | 10 | 35,453 | 230,516 | 85% | 0.8ms |
+| Implementation planning | 10 | 39,826 | 263,587 | 85% | 0.9ms |
+| Architecture review | 10 | 39,891 | 666,190 | 94% | 0.9ms |
+| Broad / exploratory | 10 | 39,778 | 770,235 | 95% | 1.0ms |
+| **Total** | **110** | **388,050** | **3,184,240** | **88%** | **0.7ms** |
 
-**Average query time: 0.3ms.** Savings scale with query complexity — simple lookups save ~70-80%, while broad architectural questions save 93-94% because the traditional approach reads entire files.
+**Total benchmark time: 76ms** (0.7ms avg per query). Savings scale with query complexity — simple lookups save ~77-81%, while broad architectural questions save 94-95% because the traditional approach reads entire files.
 
 ## CLI
 
@@ -74,30 +78,42 @@ arrow <command> [options]
 
 Commands:
   serve     Start the MCP server (stdio or HTTP)
-  index     Index a codebase
+  index     Index a codebase (auto-detects org/repo from git)
   search    Search the indexed codebase
   context   Get relevant code within a token budget
   status    Show index status and stats
+  repos     List all indexed projects
   symbols   Search for symbols (functions, classes, etc.)
+  remove    Remove a project from the index
 ```
 
 ### Examples
 
 ```bash
-# Index a project
+# Index multiple repos (each gets its own org/repo identity)
 arrow index /path/to/project
+arrow index /path/to/another/project
 
-# Check what's indexed
-arrow status
+# List all indexed repos with git info
+arrow repos
 
-# Search for code
+# Check status of a specific project
+arrow status --project org/repo
+
+# Search across all projects
 arrow search "database connection"
+
+# Search within a specific project
+arrow search "authentication" --project myorg/myrepo
 
 # Get context-window-friendly output
 arrow context "authentication flow" --budget 4000
 
 # Find all functions named "parse"
 arrow symbols parse --kind function
+
+# Remove a project from the index
+arrow remove org/repo
 
 # Start MCP server for Claude Code
 arrow serve
@@ -138,17 +154,22 @@ Or via MCP in Claude Code:
 > Index my codebase at /path/to/project
 ```
 
-### 3. Available MCP Tools (7)
+### 3. Available MCP Tools (10)
 
 | Tool | Description |
 |------|-------------|
-| `index_codebase(path)` | Index/re-index a codebase (incremental via xxHash3) |
-| `get_context(query, token_budget)` | **Main tool.** Get relevant code within a token budget |
-| `search_code(query)` | Hybrid BM25 + semantic search |
-| `search_structure(symbol)` | Find definitions by name via AST index |
-| `trace_dependencies(file)` | Show imports and reverse dependencies |
-| `project_summary()` | Compressed project overview |
-| `file_summary(path)` | Per-file breakdown: functions, classes, imports |
+| `index_codebase(path)` | Index/re-index a codebase (auto-detects git org/repo) |
+| `get_context(query, token_budget, project?)` | **Main tool.** Get relevant code within a token budget |
+| `search_code(query, project?)` | Hybrid BM25 + semantic search |
+| `search_structure(symbol, project?)` | Find definitions by name via AST index |
+| `trace_dependencies(file, project?)` | Show imports and reverse dependencies |
+| `project_summary(project?)` | Compressed project overview (one or all) |
+| `file_summary(path, project?)` | Per-file breakdown: functions, classes, imports |
+| `list_projects()` | List all indexed projects with git info and file counts |
+| `index_github_content(owner, repo, branch, files)` | Cache remote GitHub content for search |
+| `remove_project(project)` | Remove a project and all its data |
+
+All search/query tools accept an optional `project` parameter to scope results to a single repo. Omit it to search across all indexed projects.
 
 ### 4. Add to CLAUDE.md (recommended)
 
@@ -161,6 +182,7 @@ Use these MCP tools BEFORE reading files manually:
 - `get_context(query, token_budget)` — get relevant code for a task
 - `search_code(query)` — search the codebase semantically
 - `search_structure(symbol)` — find definitions
+- `list_projects()` — see all indexed repos
 - `project_summary()` — understand project structure
 ```
 
@@ -189,15 +211,35 @@ WORKSPACE_PATH=/path/to/project docker compose up -d
 docker buildx build --platform linux/amd64,linux/arm64 -t arrow:latest .
 ```
 
+## Multi-Repo & Git-Aware Indexing
+
+Arrow tracks all your repos in one shared database, organized by `org/repo` (auto-detected from git remote URLs).
+
+- **Auto-detection** — `index_codebase(/path/to/repo)` reads `git remote get-url origin` to determine `org/repo` identity. Falls back to directory name if not a git repo.
+- **Branch + commit tracking** — each project stores current branch and HEAD commit. Re-indexing detects when commits change.
+- **Per-project file watchers** — each local project gets its own watchdog instance, auto-started on server startup.
+- **GitHub content caching** — `index_github_content(owner, repo, branch, files)` lets Claude pass file contents from GitHub MCP reads into Arrow for search.
+- **Scoped search** — pass `project="org/repo"` to any search tool to scope results, or omit to search everything.
+
+### Concurrent Safety
+
+Multiple Claude Code sessions or subagents can index different repos simultaneously:
+
+- **SQLite WAL mode** — concurrent reads never block each other
+- **Per-project write locks** — `threading.Lock` per project prevents overlapping index runs on the same project
+- **Non-blocking watchers** — file change callbacks use `tryLock` to avoid blocking if an index is already running
+
 ## Architecture
 
 ```
 Claude Code ──(JSON-RPC/stdio)──> Arrow MCP Server
+                                    ├── Project Manager (git-aware, multi-repo)
                                     ├── Indexer (tree-sitter + xxHash3)
                                     ├── Hybrid Searcher (FTS5 + usearch)
                                     ├── Context Assembler (token budget)
                                     ├── Structure Analyzer (symbols + imports)
-                                    ├── File Watcher (watchdog)
+                                    ├── File Watchers (one per project, watchdog)
+                                    ├── Per-Project Locks (concurrent safety)
                                     └── Storage (SQLite WAL + FTS5 + usearch)
 ```
 

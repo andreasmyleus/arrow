@@ -71,6 +71,11 @@ def cmd_index(args):
     print(f"Indexing {root}...")
     result = indexer.index_codebase(root, force=args.force)
 
+    print(f"  Project:        {result.get('project_name', '?')}")
+    if result.get("git_branch"):
+        print(f"  Branch:         {result['git_branch']}")
+    if result.get("git_commit"):
+        print(f"  Commit:         {result['git_commit'][:8]}")
     print(f"  Files scanned:  {result['files_scanned']}")
     print(f"  Files indexed:  {result['files_indexed']}")
     print(f"  Files skipped:  {result['files_skipped']}")
@@ -91,11 +96,19 @@ def cmd_search(args):
 
     storage, _, searcher = _get_components(args.db_path, args.vec_path)
 
-    if not storage.get_project_meta("root_path"):
+    if not storage.list_projects():
         print("Error: No project indexed. Run `arrow index <path>` first.", file=sys.stderr)
         sys.exit(1)
 
-    results = searcher.search(args.query, limit=args.limit)
+    project_id = None
+    if args.project:
+        proj = storage.get_project_by_name(args.project)
+        if not proj:
+            print(f"Error: Project not found: {args.project}", file=sys.stderr)
+            sys.exit(1)
+        project_id = proj.id
+
+    results = searcher.search(args.query, limit=args.limit, project_id=project_id)
 
     if not results:
         print("No results found.")
@@ -103,9 +116,9 @@ def cmd_search(args):
         return
 
     for i, r in enumerate(results, 1):
+        proj_label = f" [{r.project_name}]" if r.project_name else ""
         print(f"\n--- [{i}] {r.file_path}:{r.chunk.start_line}-{r.chunk.end_line} "
-              f"({r.chunk.kind}: {r.chunk.name}) score={r.score:.4f} ---")
-        # Show first 20 lines of content
+              f"({r.chunk.kind}: {r.chunk.name}){proj_label} score={r.score:.4f} ---")
         lines = r.content.splitlines()
         for line in lines[:20]:
             print(f"  {line}")
@@ -121,11 +134,21 @@ def cmd_context(args):
 
     storage, _, searcher = _get_components(args.db_path, args.vec_path)
 
-    if not storage.get_project_meta("root_path"):
+    if not storage.list_projects():
         print("Error: No project indexed. Run `arrow index <path>` first.", file=sys.stderr)
         sys.exit(1)
 
-    ctx = searcher.get_context(args.query, token_budget=args.budget)
+    project_id = None
+    if args.project:
+        proj = storage.get_project_by_name(args.project)
+        if not proj:
+            print(f"Error: Project not found: {args.project}", file=sys.stderr)
+            sys.exit(1)
+        project_id = proj.id
+
+    ctx = searcher.get_context(
+        args.query, token_budget=args.budget, project_id=project_id
+    )
 
     if args.json:
         print(json.dumps(ctx, indent=2))
@@ -136,8 +159,9 @@ def cmd_context(args):
         print()
         for chunk in ctx["chunks"]:
             trunc = " [truncated]" if chunk.get("truncated") else ""
+            proj_label = f" [{chunk.get('project', '')}]" if chunk.get("project") else ""
             print(f"--- {chunk['file']}:{chunk['lines']} ({chunk['kind']}: {chunk['name']})"
-                  f" [{chunk['tokens']} tokens]{trunc} ---")
+                  f"{proj_label} [{chunk['tokens']} tokens]{trunc} ---")
             print(chunk["content"])
             print()
 
@@ -150,29 +174,65 @@ def cmd_status(args):
 
     storage, indexer, _ = _get_components(args.db_path, args.vec_path)
 
-    root = storage.get_project_meta("root_path")
-    if not root:
-        print("No project indexed.")
+    projects = storage.list_projects()
+    if not projects:
+        print("No projects indexed.")
         storage.close()
         return
 
-    summary = indexer.generate_project_summary()
+    if args.project:
+        proj = storage.get_project_by_name(args.project)
+        if not proj:
+            print(f"Error: Project not found: {args.project}", file=sys.stderr)
+            sys.exit(1)
+        projects = [proj]
 
-    print(f"Project:    {summary['root']}")
-    print(f"Files:      {summary['total_files']}")
-    print(f"Chunks:     {summary['total_chunks']}")
-    print(f"Symbols:    {summary['total_symbols']}")
-    print(f"Last index: {summary['index_duration']}")
-    print(f"Languages:")
-    for lang, count in summary["languages"].items():
-        print(f"  {lang}: {count} files")
-    print(f"Structure:")
-    for d in summary["structure"][:10]:
-        print(f"  {d['directory']}/: {d['files']} files")
-    if summary["entry_points"]:
-        print(f"Entry points:")
-        for ep in summary["entry_points"]:
-            print(f"  {ep}")
+    for proj in projects:
+        stats = storage.get_stats(project_id=proj.id)
+        print(f"\nProject:    {proj.name}")
+        if proj.root_path:
+            print(f"  Path:       {proj.root_path}")
+        if proj.remote_url:
+            print(f"  Remote:     {proj.remote_url}")
+        if proj.git_branch:
+            print(f"  Branch:     {proj.git_branch}")
+        if proj.git_commit:
+            print(f"  Commit:     {proj.git_commit[:8]}")
+        print(f"  Files:      {stats['files']}")
+        print(f"  Chunks:     {stats['chunks']}")
+        print(f"  Symbols:    {stats['symbols']}")
+        if proj.index_duration:
+            print(f"  Duration:   {proj.index_duration}")
+        if stats["languages"]:
+            print(f"  Languages:")
+            for lang, count in stats["languages"].items():
+                print(f"    {lang}: {count} files")
+
+    storage.close()
+
+
+def cmd_repos(args):
+    """List all indexed projects."""
+    _setup_logging("WARNING")
+
+    storage, _, _ = _get_components(args.db_path, args.vec_path)
+
+    projects = storage.list_projects()
+    if not projects:
+        print("No projects indexed.")
+        storage.close()
+        return
+
+    for proj in projects:
+        stats = storage.get_stats(project_id=proj.id)
+        remote = " (remote)" if proj.is_remote else ""
+        branch = f" {proj.git_branch}" if proj.git_branch else ""
+        commit = f"@{proj.git_commit[:8]}" if proj.git_commit else ""
+        files = f"{stats['files']} files"
+        dur = f"  [{proj.index_duration}]" if proj.index_duration else ""
+        print(f"  {proj.name}{remote}  {branch}{commit}  {files}{dur}")
+        if proj.root_path:
+            print(f"    {proj.root_path}")
 
     storage.close()
 
@@ -183,12 +243,22 @@ def cmd_symbols(args):
 
     storage, _, _ = _get_components(args.db_path, args.vec_path)
 
-    if not storage.get_project_meta("root_path"):
+    if not storage.list_projects():
         print("Error: No project indexed. Run `arrow index <path>` first.", file=sys.stderr)
         sys.exit(1)
 
+    project_id = None
+    if args.project:
+        proj = storage.get_project_by_name(args.project)
+        if not proj:
+            print(f"Error: Project not found: {args.project}", file=sys.stderr)
+            sys.exit(1)
+        project_id = proj.id
+
     kind = args.kind if args.kind != "any" else None
-    symbols = storage.search_symbols(args.name, kind=kind, limit=args.limit)
+    symbols = storage.search_symbols(
+        args.name, kind=kind, limit=args.limit, project_id=project_id
+    )
 
     if not symbols:
         print("No symbols found.")
@@ -202,6 +272,22 @@ def cmd_symbols(args):
         lines = f"{chunk.start_line}-{chunk.end_line}" if chunk else "?"
         print(f"  {sym.kind:10s} {sym.name:30s} {file_path}:{lines}")
 
+    storage.close()
+
+
+def cmd_remove(args):
+    """Remove a project from the index."""
+    _setup_logging("WARNING")
+
+    storage, _, _ = _get_components(args.db_path, args.vec_path)
+
+    proj = storage.get_project_by_name(args.name)
+    if not proj:
+        print(f"Error: Project not found: {args.name}", file=sys.stderr)
+        sys.exit(1)
+
+    storage.delete_project(proj.id)
+    print(f"Removed project '{args.name}' and all its data.")
     storage.close()
 
 
@@ -251,6 +337,7 @@ def main():
     p_search = subparsers.add_parser("search", help="Search the codebase")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
+    p_search.add_argument("--project", type=str, default=None, help="Project name filter")
     p_search.set_defaults(func=cmd_search)
 
     # context
@@ -258,11 +345,17 @@ def main():
     p_ctx.add_argument("query", help="What you're looking for")
     p_ctx.add_argument("--budget", type=int, default=8000, help="Token budget (default: 8000)")
     p_ctx.add_argument("--json", action="store_true", help="Output as JSON")
+    p_ctx.add_argument("--project", type=str, default=None, help="Project name filter")
     p_ctx.set_defaults(func=cmd_context)
 
     # status
     p_status = subparsers.add_parser("status", help="Show index status")
+    p_status.add_argument("--project", type=str, default=None, help="Show specific project")
     p_status.set_defaults(func=cmd_status)
+
+    # repos
+    p_repos = subparsers.add_parser("repos", help="List all indexed projects")
+    p_repos.set_defaults(func=cmd_repos)
 
     # symbols
     p_sym = subparsers.add_parser("symbols", help="Search for symbols")
@@ -273,7 +366,13 @@ def main():
         help="Filter by kind",
     )
     p_sym.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    p_sym.add_argument("--project", type=str, default=None, help="Project name filter")
     p_sym.set_defaults(func=cmd_symbols)
+
+    # remove
+    p_remove = subparsers.add_parser("remove", help="Remove a project from the index")
+    p_remove.add_argument("name", help="Project name (e.g. org/repo)")
+    p_remove.set_defaults(func=cmd_remove)
 
     args = parser.parse_args()
 

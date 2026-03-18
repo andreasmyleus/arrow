@@ -50,6 +50,7 @@ class FileWatcher:
 
     def __init__(self, root: str | Path, on_change_callback, debounce_sec: float = 2.0):
         self.root = Path(root).resolve()
+        self.project_id: Optional[int] = None
         self._observer: Optional[Observer] = None
         self._handler = _IndexHandler(on_change_callback, debounce_sec)
 
