@@ -357,11 +357,15 @@ def _collect_chunks(
         )
 
         # Recurse into children for nested definitions (e.g., methods in a class)
-        current_name = f"{parent_name}.{name}" if parent_name else name
-        for child in _get_node_children(node):
-            chunks.extend(
-                _collect_chunks(child, source_lines, language, filepath, current_name)
-            )
+        # But skip if this is a decorated_definition — the inner function/class
+        # is already captured in this chunk's content, so recursing would create
+        # a near-duplicate.
+        if node.type != "decorated_definition":
+            current_name = f"{parent_name}.{name}" if parent_name else name
+            for child in _get_node_children(node):
+                chunks.extend(
+                    _collect_chunks(child, source_lines, language, filepath, current_name)
+                )
     else:
         # Not a chunk node — recurse into children
         for child in _get_node_children(node):
@@ -446,6 +450,22 @@ def _collect_chunks_cursor(
                     f"{parent_name}.{chunk_name}" if parent_name else chunk_name
                 )
                 depth_stack.append(current_depth)
+
+                # Skip children of decorated_definition to avoid
+                # creating a near-duplicate chunk for the inner def/class
+                if node.type == "decorated_definition":
+                    if cursor.goto_next_sibling():
+                        continue
+                    retracing = True
+                    while retracing:
+                        if not cursor.goto_parent():
+                            retracing = False
+                            reached = False
+                        else:
+                            current_depth -= 1
+                            if cursor.goto_next_sibling():
+                                retracing = False
+                    continue
 
         if cursor.goto_first_child():
             current_depth += 1
