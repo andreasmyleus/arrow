@@ -1218,17 +1218,28 @@ class Storage:
             " AND " + " AND ".join(where) if where else ""
         )
 
-        rows = self.conn.execute(
-            f"""SELECT m.id, m.project_id, m.category,
-                       m.key, m.content, m.created, m.updated,
-                       m.access_count
-                FROM memories_fts fts
-                JOIN memories m ON m.id = fts.rowid
-                WHERE memories_fts MATCH ?{where_sql}
-                ORDER BY rank
-                LIMIT ?""",
-            [query, *params, limit],
-        ).fetchall()
+        # Join terms with OR so partial matches work
+        # (FTS5 default is implicit AND which is too strict)
+        terms = query.strip().split()
+        if len(terms) > 1:
+            fts_query = " OR ".join(terms)
+        else:
+            fts_query = query
+
+        try:
+            rows = self.conn.execute(
+                f"""SELECT m.id, m.project_id, m.category,
+                           m.key, m.content, m.created, m.updated,
+                           m.access_count
+                    FROM memories_fts fts
+                    JOIN memories m ON m.id = fts.rowid
+                    WHERE memories_fts MATCH ?{where_sql}
+                    ORDER BY rank
+                    LIMIT ?""",
+                [fts_query, *params, limit],
+            ).fetchall()
+        except Exception:
+            rows = []
 
         results = [dict(r) for r in rows]
         # Bump access count for recalled memories
