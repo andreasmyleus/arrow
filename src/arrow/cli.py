@@ -356,6 +356,118 @@ def cmd_symbols(args):
     storage.close()
 
 
+def cmd_diff_context(args):
+    """Show changed code plus callers and dependents."""
+    _setup_logging("WARNING")
+
+    storage, indexer, searcher = _get_components(args.db_path, args.vec_path)
+
+    project_id = None
+    if args.project:
+        proj = storage.get_project_by_name(args.project)
+        if not proj:
+            print(f"Error: Project not found: {args.project}", file=sys.stderr)
+            sys.exit(1)
+        project_id = proj.id
+
+    file_rec = storage.get_file(args.file, project_id=project_id)
+    if not file_rec:
+        print(f"Error: File not indexed: {args.file}", file=sys.stderr)
+        sys.exit(1)
+
+    # Use server tool logic directly
+    from .server import get_diff_context as _get_diff_context
+    result = json.loads(_get_diff_context(
+        args.file, args.line_start, args.line_end, args.project
+    ))
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"File: {result['file']}")
+    print(f"Changed functions: {len(result['changed_functions'])}")
+    for func in result["changed_functions"]:
+        print(f"  {func['kind']}: {func['name']} ({func['lines']})")
+
+    if result["callers"]:
+        print(f"\nCallers ({result['total_callers']}):")
+        for caller in result["callers"][:20]:
+            print(f"  {caller['file']}:{caller['lines']} "
+                  f"({caller['kind']}: {caller['name']}) -> {caller['calls']}")
+
+    if result["dependent_files"]:
+        print(f"\nDependent files ({result['total_dependents']}):")
+        for dep in result["dependent_files"]:
+            print(f"  {dep['path']}")
+
+    storage.close()
+
+
+def cmd_impact(args):
+    """Show what breaks if you change a file or function."""
+    _setup_logging("WARNING")
+
+    from .server import what_breaks_if_i_change
+    result = json.loads(what_breaks_if_i_change(
+        args.file, args.function, args.project
+    ))
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Impact analysis: {result['file']}")
+    print(f"Symbols: {', '.join(result['symbols_analyzed'])}")
+    print(f"Risk: {result['risk'].upper()}")
+
+    summary = result["summary"]
+    print(f"\n  Callers:    {summary['total_callers']}")
+    print(f"  Tests:      {summary['total_tests']}")
+    print(f"  Dependents: {summary['total_dependents']}")
+
+    if result["callers"]:
+        print(f"\nCallers:")
+        for caller in result["callers"][:20]:
+            print(f"  {caller['file']} — {caller['kind']}: "
+                  f"{caller['name']} (calls {caller['calls']})")
+
+    if result["affected_tests"]:
+        print(f"\nAffected tests:")
+        for test in result["affected_tests"][:20]:
+            print(f"  {test['file']} — {test['test_name']} "
+                  f"(references {test['references']})")
+
+
+def cmd_tests_for(args):
+    """Find tests for a specific function."""
+    _setup_logging("WARNING")
+
+    from .server import get_tests_for
+    result = json.loads(get_tests_for(
+        args.function, args.file, args.project
+    ))
+
+    print(f"Tests for: {result['function']}")
+    if result.get("source_file"):
+        print(f"Source: {result['source_file']}")
+
+    if not result["tests"]:
+        print("No tests found.")
+        return
+
+    print(f"Found {result['total']} test(s):\n")
+    for test in result["tests"]:
+        print(f"--- {test['file']}:{test['lines']} "
+              f"({test['test_name']}) [{test['match_type']}] ---")
+        lines = test["content"].splitlines()
+        for line in lines[:15]:
+            print(f"  {line}")
+        if len(lines) > 15:
+            print(f"  ... ({len(lines) - 15} more lines)")
+        print()
+
+
 def cmd_remove(args):
     """Remove a project from the index."""
     _setup_logging("WARNING")
@@ -469,6 +581,46 @@ def main():
         default="INFO", help="Log level",
     )
     p_pr.set_defaults(func=cmd_pr)
+
+    # diff-context
+    p_diff = subparsers.add_parser(
+        "diff-context", help="Show changed code + callers/dependents",
+    )
+    p_diff.add_argument("file", help="Relative path to changed file")
+    p_diff.add_argument(
+        "--line-start", type=int, default=0,
+        help="Start line (0=auto from git diff)",
+    )
+    p_diff.add_argument(
+        "--line-end", type=int, default=0,
+        help="End line (0=auto from git diff)",
+    )
+    p_diff.add_argument("--project", type=str, default=None)
+    p_diff.set_defaults(func=cmd_diff_context)
+
+    # impact
+    p_impact = subparsers.add_parser(
+        "impact", help="Show what breaks if you change a file/function",
+    )
+    p_impact.add_argument("file", help="Relative path to the file")
+    p_impact.add_argument(
+        "--function", type=str, default=None,
+        help="Specific function name (omit for all)",
+    )
+    p_impact.add_argument("--project", type=str, default=None)
+    p_impact.set_defaults(func=cmd_impact)
+
+    # tests-for
+    p_tests = subparsers.add_parser(
+        "tests-for", help="Find tests for a function",
+    )
+    p_tests.add_argument("function", help="Function name")
+    p_tests.add_argument(
+        "--file", type=str, default=None,
+        help="Source file (narrows search)",
+    )
+    p_tests.add_argument("--project", type=str, default=None)
+    p_tests.set_defaults(func=cmd_tests_for)
 
     # remove
     p_remove = subparsers.add_parser("remove", help="Remove a project from the index")

@@ -13,7 +13,12 @@ Arrow pre-indexes your codebases using tree-sitter AST parsing, then serves rele
 - **AST-based chunking** — tree-sitter parses code into semantic units (functions, classes) across 64+ languages
 - **Hybrid search** — BM25 full-text (FTS5) + semantic vector search (usearch + ONNX embeddings)
 - **Incremental indexing** — xxHash3 content-hashing ensures only changed files are re-indexed
-- **Token-budget aware** — `get_context` returns the most relevant code within an exact token limit
+- **Smart token budgeting** — auto-estimates optimal budget from query complexity (500 tokens for lookups, 8000+ for architecture reviews)
+- **Semantic diff context** — `get_diff_context` returns changed code plus all callers and dependents of modified functions
+- **Change impact analysis** — `what_breaks_if_i_change` traces reverse dependencies, affected tests, and risk level
+- **Cross-repo symbol resolution** — `resolve_symbol` finds definitions across all indexed repos when tracing imports
+- **Test mapping** — `get_tests_for` maps any function to its test files via import tracing + naming conventions
+- **Auto-warm on startup** — background-indexes the working directory on server start so the first query is instant
 - **Automatic re-indexing** — watchdog monitors file changes per-project and re-indexes in the background
 - **Concurrent-safe** — SQLite WAL mode + per-project write locks for multiple Claude Code sessions / subagents
 - **100% local** — no cloud APIs, no external dependencies, runs on CPU
@@ -52,23 +57,23 @@ Real-world coding tasks on Arrow's own codebase (22 files, ~4k lines). Arrow use
 
 ### Comprehensive Benchmark (110 queries, 10 complexity tiers)
 
-Tested across query types ranging from simple symbol lookups to broad architectural reviews. All queries use a 4000-token budget. Benchmarked on Arrow's own codebase (14 files, 54 chunks).
+Tested across query types ranging from simple symbol lookups to broad architectural reviews. All queries use a 4000-token budget. Benchmarked on Arrow's own codebase (14 files, 161 chunks).
 
 | Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings | Avg Query Time |
 |-----------------|---------|-------------|-------------------|---------|----------------|
-| Symbol lookup | 15 | 57,308 | 342,022 | 83% | 0.4ms |
-| Method lookup | 15 | 46,376 | 221,331 | 79% | 0.3ms |
-| Single concept | 10 | 25,744 | 153,949 | 83% | 0.3ms |
-| Two concepts | 10 | 39,361 | 206,620 | 81% | 0.5ms |
-| How-does-X-work | 10 | 35,877 | 292,943 | 88% | 0.9ms |
-| Cross-file tracing | 10 | 31,851 | 246,602 | 87% | 0.7ms |
-| Debugging | 10 | 35,947 | 278,280 | 87% | 0.8ms |
-| Implementation planning | 10 | 39,917 | 308,732 | 87% | 0.8ms |
-| Architecture review | 10 | 39,948 | 787,690 | 95% | 0.7ms |
-| Broad / exploratory | 10 | 39,937 | 907,095 | 96% | 0.9ms |
-| **Total** | **110** | **392,266** | **3,745,264** | **90%** | **0.6ms** |
+| Symbol lookup | 15 | 45,857 | 289,543 | 84% | 0.4ms |
+| Method lookup | 15 | 36,717 | 199,929 | 82% | 0.2ms |
+| Single concept | 10 | 19,950 | 131,566 | 85% | 0.3ms |
+| Two concepts | 10 | 34,793 | 177,044 | 80% | 0.4ms |
+| How-does-X-work | 10 | 35,721 | 263,327 | 86% | 0.8ms |
+| Cross-file tracing | 10 | 31,736 | 224,210 | 86% | 0.7ms |
+| Debugging | 10 | 35,855 | 249,383 | 86% | 0.7ms |
+| Implementation planning | 10 | 39,795 | 277,203 | 86% | 0.7ms |
+| Architecture review | 10 | 39,819 | 712,856 | 94% | 0.8ms |
+| Broad / exploratory | 10 | 39,828 | 816,129 | 95% | 0.9ms |
+| **Total** | **110** | **360,071** | **3,341,190** | **89%** | **0.6ms** |
 
-**Total benchmark time: 65ms** (0.6ms avg per query). Savings scale with query complexity — simple lookups save ~79-83%, while broad architectural questions save 95-96% because the traditional approach reads entire files. The traditional approach's real cost is token consumption (3.7M tokens) rather than query time — each query reads entire matching files rather than targeted chunks.
+**Total benchmark time: 62ms** (0.6ms avg per query). Savings scale with query complexity — simple lookups save ~80-85%, while broad architectural questions save 94-95% because the traditional approach reads entire files. The traditional approach's real cost is token consumption (3.3M tokens) rather than query time — each query reads entire matching files rather than targeted chunks.
 
 ## CLI
 
@@ -78,16 +83,19 @@ Arrow includes a full CLI for indexing, searching, and serving without Claude Co
 arrow <command> [options]
 
 Commands:
-  serve     Start the MCP server (stdio or HTTP)
-  index     Index a codebase (auto-detects org/repo from git)
-  search    Search the indexed codebase
-  context   Get relevant code within a token budget
-  status    Show index status and stats
-  repos     List all indexed projects
-  snapshot  Index at a specific git commit/tag/branch
-  pr        Index both sides of a pull request
-  symbols   Search for symbols (functions, classes, etc.)
-  remove    Remove a project from the index
+  serve         Start the MCP server (stdio or HTTP)
+  index         Index a codebase (auto-detects org/repo from git)
+  search        Search the indexed codebase
+  context       Get relevant code within a token budget
+  status        Show index status and stats
+  repos         List all indexed projects
+  snapshot      Index at a specific git commit/tag/branch
+  pr            Index both sides of a pull request
+  symbols       Search for symbols (functions, classes, etc.)
+  diff-context  Show changed code + callers/dependents
+  impact        What breaks if you change a file/function
+  tests-for     Find tests for a function
+  remove        Remove a project from the index
 ```
 
 ### Examples
@@ -128,6 +136,18 @@ arrow pr /path/to/project 123
 # Then search either side:
 arrow search "auth" --project "org/repo@base:PR-123"
 arrow search "auth" --project "org/repo@pr:PR-123"
+
+# See what changed + who calls those functions
+arrow diff-context src/auth.py
+arrow diff-context src/auth.py --line-start 10 --line-end 25
+
+# Impact analysis: what breaks if I change this?
+arrow impact src/auth.py
+arrow impact src/auth.py --function authenticate
+
+# Find tests for a function
+arrow tests-for authenticate
+arrow tests-for authenticate --file src/auth.py
 
 # Remove a project from the index
 arrow remove org/repo
@@ -171,16 +191,20 @@ Or via MCP in Claude Code:
 > Index my codebase at /path/to/project
 ```
 
-### 3. Available MCP Tools (12)
+### 3. Available MCP Tools (17)
 
 | Tool | Description |
 |------|-------------|
 | `index_codebase(path)` | Index/re-index a codebase (auto-detects git org/repo) |
 | `index_git_commit(path, ref)` | Index at a specific commit/tag/branch (creates `org/repo@ref` snapshot) |
 | `index_pr(path, pr_number)` | Index both sides of a PR (base + head) for review and comparison |
-| `get_context(query, token_budget, project?)` | **Main tool.** Get relevant code within a token budget |
+| `get_context(query, token_budget?, project?)` | **Main tool.** Get relevant code within a token budget. Budget auto-estimated if omitted. |
 | `search_code(query, project?)` | Hybrid BM25 + semantic search |
 | `search_structure(symbol, project?)` | Find definitions by name via AST index |
+| `get_diff_context(file, line_start?, line_end?)` | Changed code + all callers/dependents of modified functions |
+| `what_breaks_if_i_change(file, function?)` | Impact analysis: callers, affected tests, risk level |
+| `resolve_symbol(symbol, project?)` | Cross-repo symbol resolution — find definitions across all indexed repos |
+| `get_tests_for(function, file?, project?)` | Find test code for a function via import tracing + naming conventions |
 | `trace_dependencies(file, project?)` | Show imports and reverse dependencies |
 | `project_summary(project?)` | Compressed project overview (one or all) |
 | `file_summary(path, project?)` | Per-file breakdown: functions, classes, imports |
@@ -198,11 +222,14 @@ All search/query tools accept an optional `project` parameter to scope results t
 This project has an MCP server `arrow` for fast code search.
 
 Use these MCP tools BEFORE reading files manually:
-- `get_context(query, token_budget)` — get relevant code for a task
+- `get_context(query)` — get relevant code (auto-budgets based on complexity)
 - `search_code(query)` — search the codebase semantically
 - `search_structure(symbol)` — find definitions
+- `get_diff_context(file)` — see changed code + all callers/dependents
+- `what_breaks_if_i_change(file, function)` — impact analysis before changes
+- `get_tests_for(function)` — find tests for a function
+- `resolve_symbol(symbol)` — find definitions across all indexed repos
 - `list_projects()` — see all indexed repos
-- `project_summary()` — understand project structure
 ```
 
 ## Docker

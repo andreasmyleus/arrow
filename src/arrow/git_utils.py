@@ -221,3 +221,37 @@ def get_changed_files_between(path: Path, base: str, head: str) -> list[str]:
     if output is None:
         return []
     return [line for line in output.splitlines() if line]
+
+
+def get_diff_hunks(path: Path, file_path: str, ref: str = "HEAD") -> list[dict]:
+    """Get diff hunks for a file showing changed line ranges.
+
+    Returns list of {"start": int, "count": int, "lines": [...]} for each hunk.
+    Compares working tree against ref (default HEAD), or ref~1..ref if no
+    working tree changes.
+    """
+    # Try working tree diff first
+    output = _git_cmd(path, "diff", "-U0", ref, "--", file_path)
+    if not output:
+        # Try committed diff (last commit)
+        output = _git_cmd(path, "diff", "-U0", f"{ref}~1", ref, "--", file_path)
+    if not output:
+        return []
+
+    hunks = []
+    current_hunk = None
+    for line in output.splitlines():
+        # Parse @@ -old,count +new,count @@ header
+        m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+        if m:
+            if current_hunk:
+                hunks.append(current_hunk)
+            start = int(m.group(1))
+            count = int(m.group(2)) if m.group(2) else 1
+            current_hunk = {"start": start, "count": count, "lines": []}
+        elif current_hunk is not None and line.startswith("+") and not line.startswith("+++"):
+            current_hunk["lines"].append(line[1:])
+
+    if current_hunk:
+        hunks.append(current_hunk)
+    return hunks

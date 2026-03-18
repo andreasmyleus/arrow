@@ -11,6 +11,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from .embedder import Embedder, get_embedder
+from .git_utils import get_diff_hunks, is_git_repo
 from .indexer import Indexer
 from .search import HybridSearcher
 from .storage import Storage
@@ -291,7 +292,7 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
 
 @mcp.tool()
 def get_context(
-    query: str, token_budget: int = 8000, project: str | None = None
+    query: str, token_budget: int = 0, project: str | None = None
 ) -> str:
     """Get the most relevant code for a query, compressed to fit a token budget.
 
@@ -300,7 +301,9 @@ def get_context(
 
     Args:
         query: What you're looking for (natural language or keywords).
-        token_budget: Maximum tokens to return (default 8000).
+        token_budget: Maximum tokens to return. Set to 0 (default) for
+                      automatic budget based on query complexity. Simple
+                      lookups get ~500 tokens, broad questions get ~8000+.
         project: Optional project name to scope search. Omit for all projects.
 
     Returns:
@@ -314,9 +317,15 @@ def get_context(
 
     project_id = _resolve_project_id(project)
     searcher = _get_searcher()
+
+    # Auto-estimate budget if not specified
+    if token_budget <= 0:
+        token_budget = searcher.estimate_budget(query, project_id=project_id)
+
     context = searcher.get_context(
         query, token_budget=token_budget, project_id=project_id
     )
+    context["budget_mode"] = "auto" if token_budget else "manual"
     return json.dumps(context, indent=2)
 
 
@@ -557,6 +566,371 @@ def index_pr(path: str, pr_number: int) -> str:
 
 
 @mcp.tool()
+def get_diff_context(
+    file: str, line_start: int = 0, line_end: int = 0,
+    project: str | None = None,
+) -> str:
+    """Get changed code plus all callers and dependents of modified functions.
+
+    When reviewing changes, this returns the diff hunks AND the code that
+    calls or depends on the changed functions — so you see the full impact
+    without reading random files.
+
+    Args:
+        file: Relative path to the changed file.
+        line_start: Start of line range to focus on (0 = auto-detect from git diff).
+        line_end: End of line range (0 = auto-detect from git diff).
+        project: Optional project name to scope lookup.
+
+    Returns:
+        JSON with changed functions, their callers, dependent files, and code.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+
+    file_rec = storage.get_file(file, project_id=project_id)
+    if not file_rec:
+        return json.dumps({"error": f"File not indexed: {file}"})
+
+    # Get the project's root path for git operations
+    proj = storage.get_project(file_rec.project_id) if file_rec.project_id else None
+    root = Path(proj.root_path) if proj and proj.root_path else None
+
+    # Find which functions were changed
+    chunks = storage.get_chunks_for_file(file_rec.id)
+    changed_functions = []
+
+    if root and root.is_dir():
+        hunks = get_diff_hunks(root, file)
+        if hunks and not line_start:
+            # Auto-detect changed line ranges from git diff
+            for hunk in hunks:
+                hunk_start = hunk["start"]
+                hunk_end = hunk_start + hunk["count"]
+                for chunk in chunks:
+                    if (chunk.start_line <= hunk_end and
+                            chunk.end_line >= hunk_start and
+                            chunk.kind in ("function", "method", "class")):
+                        if chunk.name not in [c["name"] for c in changed_functions]:
+                            changed_functions.append({
+                                "name": chunk.name,
+                                "kind": chunk.kind,
+                                "lines": f"{chunk.start_line}-{chunk.end_line}",
+                                "content": chunk.content_text or "",
+                            })
+
+    if line_start and line_end:
+        for chunk in chunks:
+            if (chunk.start_line <= line_end and
+                    chunk.end_line >= line_start and
+                    chunk.kind in ("function", "method", "class")):
+                if chunk.name not in [c["name"] for c in changed_functions]:
+                    changed_functions.append({
+                        "name": chunk.name,
+                        "kind": chunk.kind,
+                        "lines": f"{chunk.start_line}-{chunk.end_line}",
+                        "content": chunk.content_text or "",
+                    })
+
+    # Find callers/dependents for each changed function
+    callers = []
+    seen_callers = set()
+    for func in changed_functions:
+        func_callers = storage.get_callers_of_symbol(
+            func["name"], project_id=file_rec.project_id
+        )
+        for caller in func_callers:
+            caller_key = (caller["file_path"], caller["name"])
+            if caller_key not in seen_callers:
+                seen_callers.add(caller_key)
+                callers.append({
+                    "file": caller["file_path"],
+                    "name": caller["name"],
+                    "kind": caller["kind"],
+                    "lines": f"{caller['start_line']}-{caller['end_line']}",
+                    "calls": func["name"],
+                })
+
+    # Find files that import this file
+    importers = storage.get_importers_of_file(
+        file, project_id=file_rec.project_id
+    )
+
+    return json.dumps({
+        "file": file,
+        "changed_functions": changed_functions,
+        "callers": callers[:30],
+        "dependent_files": [
+            {"path": imp["path"], "language": imp.get("language")}
+            for imp in importers
+        ],
+        "total_callers": len(callers),
+        "total_dependents": len(importers),
+    }, indent=2)
+
+
+@mcp.tool()
+def what_breaks_if_i_change(
+    file: str, function: str | None = None, project: str | None = None
+) -> str:
+    """Trace reverse dependencies to show what breaks if you change a file or function.
+
+    Returns all callers, test files that exercise the function, config files
+    that reference it, and dependent files across the full index.
+
+    Args:
+        file: Relative path to the file you plan to change.
+        function: Optional specific function name. If omitted, analyzes all
+                  exported symbols in the file.
+        project: Optional project name to scope lookup.
+
+    Returns:
+        JSON impact report with callers, tests, dependents, and risk assessment.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+
+    file_rec = storage.get_file(file, project_id=project_id)
+    if not file_rec:
+        return json.dumps({"error": f"File not indexed: {file}"})
+
+    effective_pid = file_rec.project_id
+
+    # Get symbols to analyze
+    if function:
+        target_symbols = [function]
+    else:
+        chunks = storage.get_chunks_for_file(file_rec.id)
+        target_symbols = [
+            c.name for c in chunks
+            if c.kind in ("function", "method", "class")
+            and c.name and c.name != "<anonymous>"
+        ]
+
+    # Find all callers for each symbol
+    all_callers = []
+    seen = set()
+    for sym in target_symbols:
+        callers = storage.get_callers_of_symbol(sym, project_id=effective_pid)
+        for caller in callers:
+            key = (caller["file_path"], caller["name"])
+            if key not in seen:
+                seen.add(key)
+                all_callers.append({
+                    "file": caller["file_path"],
+                    "name": caller["name"],
+                    "kind": caller["kind"],
+                    "calls": sym,
+                })
+
+    # Find test files that reference any of the target symbols
+    test_files = storage.get_test_files(project_id=effective_pid)
+    test_file_ids = [tf.id for tf in test_files]
+
+    affected_tests = []
+    for sym in target_symbols:
+        test_refs = storage.find_chunks_referencing(sym, test_file_ids)
+        for ref in test_refs:
+            test_key = (ref["file_path"], ref["name"])
+            if test_key not in seen:
+                seen.add(test_key)
+                affected_tests.append({
+                    "file": ref["file_path"],
+                    "test_name": ref["name"],
+                    "references": sym,
+                })
+
+    # Find files that import this module
+    importers = storage.get_importers_of_file(file, project_id=effective_pid)
+
+    # Risk assessment
+    caller_count = len(all_callers)
+    test_count = len(affected_tests)
+    importer_count = len(importers)
+
+    if caller_count > 20 or importer_count > 10:
+        risk = "high"
+    elif caller_count > 5 or importer_count > 3:
+        risk = "medium"
+    else:
+        risk = "low"
+
+    return json.dumps({
+        "file": file,
+        "symbols_analyzed": target_symbols,
+        "risk": risk,
+        "callers": all_callers[:50],
+        "affected_tests": affected_tests[:30],
+        "dependent_files": [
+            {"path": imp["path"]} for imp in importers
+        ],
+        "summary": {
+            "total_callers": caller_count,
+            "total_tests": test_count,
+            "total_dependents": importer_count,
+        },
+    }, indent=2)
+
+
+@mcp.tool()
+def resolve_symbol(
+    symbol: str, project: str | None = None
+) -> str:
+    """Resolve a symbol across all indexed repos (cross-repo import resolution).
+
+    When you see `from shared_lib import auth`, this tool finds which indexed
+    repo contains `shared_lib.auth` and returns its definition. Works across
+    all indexed projects.
+
+    Args:
+        symbol: The symbol name to resolve (e.g. "auth", "DatabaseClient").
+        project: Optional source project name — results from other projects
+                 are prioritized.
+
+    Returns:
+        JSON with all matching definitions across repos, with code.
+    """
+    storage = _get_storage()
+    source_pid = _resolve_project_id(project)
+
+    # Search across all repos
+    results = storage.resolve_symbol_across_repos(
+        symbol, exclude_project_id=source_pid
+    )
+
+    # Also search within source project for completeness
+    local_results = storage.resolve_symbol_across_repos(symbol)
+
+    # Deduplicate: cross-repo first, then local
+    seen = set()
+    output = []
+    for result in results + local_results:
+        key = (result["project_name"], result["path"], result["name"])
+        if key not in seen:
+            seen.add(key)
+            output.append({
+                "symbol": result["name"],
+                "kind": result["kind"],
+                "file": result["path"],
+                "project": result["project_name"],
+                "lines": f"{result['start_line']}-{result['end_line']}",
+                "content": result.get("content_text", ""),
+                "cross_repo": result["project_id"] != source_pid if source_pid else False,
+            })
+
+    return json.dumps({
+        "query": symbol,
+        "source_project": project,
+        "results": output[:20],
+        "total": len(output),
+    }, indent=2)
+
+
+@mcp.tool()
+def get_tests_for(
+    function: str, file: str | None = None, project: str | None = None
+) -> str:
+    """Find test code for a specific function via import tracing + naming conventions.
+
+    Maps a function to its test files by:
+    1. Finding test files that import the source module
+    2. Finding test functions whose names match (test_<function>)
+    3. Finding test chunks that reference the function name
+
+    Args:
+        function: The function name to find tests for.
+        file: Optional source file path (narrows the search).
+        project: Optional project name.
+
+    Returns:
+        JSON with matching test functions and their code.
+    """
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+
+    # Get all test files
+    test_files = storage.get_test_files(project_id=project_id)
+    if not test_files:
+        return json.dumps({
+            "function": function,
+            "tests": [],
+            "message": "No test files found in the index.",
+        })
+
+    # Strategy 1: Find test functions named test_<function> or test<Function>
+    camel_name = function[0].upper() + function[1:] if function else ""
+    matching_tests = []
+    seen = set()
+
+    name_patterns = [
+        f"test_{function}",
+        f"Test{camel_name}",
+        f"test{camel_name}",
+    ]
+
+    for tf in test_files:
+        chunks = storage.get_chunks_for_file(tf.id)
+        for chunk in chunks:
+            # Match by naming convention
+            name_match = any(
+                chunk.name and chunk.name.startswith(pat)
+                for pat in name_patterns
+            )
+            # Match by content reference
+            content_match = (
+                chunk.content_text and function in chunk.content_text
+            )
+            if name_match or content_match:
+                key = (tf.path, chunk.name)
+                if key not in seen:
+                    seen.add(key)
+                    matching_tests.append({
+                        "file": tf.path,
+                        "test_name": chunk.name,
+                        "kind": chunk.kind,
+                        "lines": f"{chunk.start_line}-{chunk.end_line}",
+                        "content": chunk.content_text or "",
+                        "match_type": "name" if name_match else "reference",
+                    })
+
+    # Strategy 2: If source file given, find tests that import it
+    import_tests = []
+    if file:
+        stem = Path(file).stem
+        for tf in test_files:
+            # Check if this test file imports the source module
+            imports = storage.conn.execute(
+                "SELECT symbol FROM imports WHERE source_file = ?",
+                (tf.id,),
+            ).fetchall()
+            if any(stem in (imp[0] or "") for imp in imports):
+                # This test file imports the source — get relevant chunks
+                chunks = storage.get_chunks_for_file(tf.id)
+                for chunk in chunks:
+                    if chunk.content_text and function in chunk.content_text:
+                        key = (tf.path, chunk.name)
+                        if key not in seen:
+                            seen.add(key)
+                            import_tests.append({
+                                "file": tf.path,
+                                "test_name": chunk.name,
+                                "kind": chunk.kind,
+                                "lines": f"{chunk.start_line}-{chunk.end_line}",
+                                "content": chunk.content_text or "",
+                                "match_type": "import",
+                            })
+
+    all_tests = matching_tests + import_tests
+
+    return json.dumps({
+        "function": function,
+        "source_file": file,
+        "tests": all_tests[:30],
+        "total": len(all_tests),
+    }, indent=2)
+
+
+@mcp.tool()
 def remove_project(project: str) -> str:
     """Remove a project and all its indexed data.
 
@@ -587,6 +961,65 @@ def remove_project(project: str) -> str:
 
 
 # ─── Entry points ──────────────────────────────────────────────────────
+
+
+def _auto_warm_cwd() -> None:
+    """Auto-index the current working directory in the background.
+
+    Called on server startup so the first query doesn't pay the indexing cost.
+    Skips if the directory is already indexed and up to date.
+    """
+    cwd = Path.cwd()
+    if not cwd.is_dir() or not is_git_repo(cwd):
+        return
+
+    storage = _get_storage()
+    existing = storage.get_project_by_root(str(cwd))
+
+    # If already indexed recently (within last 5 min), skip
+    if existing and existing.last_indexed:
+        import time
+        if time.time() - existing.last_indexed < 300:
+            return
+
+    def _warm():
+        try:
+            # Create dedicated storage/indexer for this thread
+            # (SQLite connections can't cross threads)
+            from .embedder import get_embedder as _ge
+            from .storage import Storage as _S
+            from .vector_store import VectorStore as _VS
+
+            db_path = os.environ.get(
+                "ARROW_DB_PATH", str(DEFAULT_DB_PATH)
+            )
+            vec_path = os.environ.get(
+                "ARROW_VECTOR_PATH", str(DEFAULT_VECTOR_PATH)
+            )
+            thread_storage = _S(db_path)
+            thread_vs = _VS(vec_path)
+            thread_emb = _ge()
+            thread_indexer = Indexer(
+                thread_storage,
+                vector_store=thread_vs,
+                embedder=thread_emb,
+            )
+            result = thread_indexer.index_codebase(cwd)
+            thread_storage.close()
+
+            pid = result.get("project_id")
+            if pid:
+                _start_watcher(pid, str(cwd))
+            logger.info(
+                "Auto-warm complete: %s (%s files)",
+                result.get("project_name", "?"),
+                result.get("files_scanned", 0),
+            )
+        except Exception:
+            logger.exception("Auto-warm failed for %s", cwd)
+
+    thread = threading.Thread(target=_warm, daemon=True)
+    thread.start()
 
 
 def main():
@@ -630,6 +1063,9 @@ def main():
 
     # Start watchers for all existing local projects
     _start_all_watchers()
+
+    # Auto-warm: index the working directory in the background if not indexed
+    _auto_warm_cwd()
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")

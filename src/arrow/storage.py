@@ -676,5 +676,157 @@ class Storage:
             "languages": {r["language"]: r["cnt"] for r in languages},
         }
 
+    def get_callers_of_symbol(
+        self, symbol_name: str, project_id: Optional[int] = None
+    ) -> list[dict]:
+        """Find all chunks that reference a symbol name (callers/dependents).
+
+        Searches content_text for the symbol name in chunks that are NOT
+        the definition itself.
+        """
+        if project_id is not None:
+            rows = self.conn.execute(
+                """SELECT c.id, c.name, c.kind, c.start_line, c.end_line,
+                          c.content_text, c.file_id, c.project_id,
+                          f.path as file_path
+                   FROM chunks c
+                   JOIN files f ON f.id = c.file_id
+                   WHERE c.content_text LIKE ?
+                   AND c.name != ?
+                   AND c.project_id = ?
+                   LIMIT 50""",
+                (f"%{symbol_name}%", symbol_name, project_id),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT c.id, c.name, c.kind, c.start_line, c.end_line,
+                          c.content_text, c.file_id, c.project_id,
+                          f.path as file_path
+                   FROM chunks c
+                   JOIN files f ON f.id = c.file_id
+                   WHERE c.content_text LIKE ?
+                   AND c.name != ?
+                   LIMIT 50""",
+                (f"%{symbol_name}%", symbol_name),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_test_files(self, project_id: Optional[int] = None) -> list[FileRecord]:
+        """Get all test files in a project (files matching test patterns)."""
+        if project_id is not None:
+            rows = self.conn.execute(
+                """SELECT * FROM files WHERE project_id = ?
+                   AND (path LIKE '%test_%' OR path LIKE '%_test.%'
+                        OR path LIKE '%tests/%' OR path LIKE '%spec/%'
+                        OR path LIKE '%__tests__%')""",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT * FROM files
+                   WHERE path LIKE '%test_%' OR path LIKE '%_test.%'
+                        OR path LIKE '%tests/%' OR path LIKE '%spec/%'
+                        OR path LIKE '%__tests__%'"""
+            ).fetchall()
+        return [FileRecord(**dict(r)) for r in rows]
+
+    def find_chunks_referencing(
+        self, symbol_name: str, file_ids: list[int]
+    ) -> list[dict]:
+        """Find chunks in specific files that reference a symbol."""
+        if not file_ids:
+            return []
+        placeholders = ",".join("?" for _ in file_ids)
+        rows = self.conn.execute(
+            f"""SELECT c.id, c.name, c.kind, c.start_line, c.end_line,
+                       c.content_text, c.file_id, f.path as file_path
+                FROM chunks c
+                JOIN files f ON f.id = c.file_id
+                WHERE c.file_id IN ({placeholders})
+                AND c.content_text LIKE ?""",
+            file_ids + [f"%{symbol_name}%"],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_importers_of_file(
+        self, file_path: str, project_id: Optional[int] = None
+    ) -> list[dict]:
+        """Find all files that import from a given file (by stem or module name)."""
+        stem = Path(file_path).stem
+        if project_id is not None:
+            rows = self.conn.execute(
+                """SELECT DISTINCT f.id, f.path, f.language, f.project_id
+                   FROM imports i
+                   JOIN files f ON f.id = i.source_file
+                   WHERE i.symbol LIKE ?
+                   AND f.project_id = ?""",
+                (f"%{stem}%", project_id),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT DISTINCT f.id, f.path, f.language, f.project_id
+                   FROM imports i
+                   JOIN files f ON f.id = i.source_file
+                   WHERE i.symbol LIKE ?""",
+                (f"%{stem}%",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_symbol_across_repos(
+        self, symbol_name: str, exclude_project_id: Optional[int] = None
+    ) -> list[dict]:
+        """Find a symbol definition across all indexed repos.
+
+        Used for cross-repo import resolution.
+        """
+        if exclude_project_id is not None:
+            rows = self.conn.execute(
+                """SELECT s.name, s.kind, f.path, f.project_id, p.name as project_name,
+                          c.start_line, c.end_line, c.content_text
+                   FROM symbols s
+                   JOIN files f ON f.id = s.file_id
+                   JOIN chunks c ON c.id = s.chunk_id
+                   JOIN projects p ON p.id = f.project_id
+                   WHERE s.name = ?
+                   AND f.project_id != ?
+                   LIMIT 20""",
+                (symbol_name, exclude_project_id),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT s.name, s.kind, f.path, f.project_id, p.name as project_name,
+                          c.start_line, c.end_line, c.content_text
+                   FROM symbols s
+                   JOIN files f ON f.id = s.file_id
+                   JOIN chunks c ON c.id = s.chunk_id
+                   JOIN projects p ON p.id = f.project_id
+                   WHERE s.name = ?
+                   LIMIT 20""",
+                (symbol_name,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_fts_hits(self, query: str, project_id: Optional[int] = None) -> int:
+        """Count how many chunks match an FTS query. Used for budget estimation."""
+        fts_query = " OR ".join(w for w in query.split() if w.strip())
+        if not fts_query:
+            return 0
+        try:
+            if project_id is not None:
+                row = self.conn.execute(
+                    """SELECT COUNT(*) FROM chunks_fts cf
+                       JOIN chunks c ON c.id = cf.rowid
+                       WHERE cf.chunks_fts MATCH ? AND c.project_id = ?""",
+                    (fts_query, project_id),
+                ).fetchone()
+            else:
+                row = self.conn.execute(
+                    "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH ?",
+                    (fts_query,),
+                ).fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
+
     def commit(self) -> None:
         self.conn.commit()

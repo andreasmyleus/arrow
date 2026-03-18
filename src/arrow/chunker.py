@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -249,16 +250,49 @@ def _get_parser(language: str):
     return _languages[language]
 
 
+def _get_node_children(node) -> list:
+    """Get children of a node, handling different tree-sitter API versions."""
+    # Try node.children first (works in most versions)
+    try:
+        children = node.children
+        if children is not None and len(children) > 0:
+            return list(children)
+    except (AttributeError, TypeError):
+        pass
+
+    # Fall back to TreeCursor-based traversal
+    try:
+        cursor = node.walk()
+        if not cursor.goto_first_child():
+            return []
+        children = []
+        while True:
+            children.append(cursor.node)
+            if not cursor.goto_next_sibling():
+                break
+        return children
+    except (AttributeError, TypeError):
+        pass
+
+    # Last resort: try child_count + child()
+    try:
+        count = node.child_count
+        return [node.child(i) for i in range(count)]
+    except (AttributeError, TypeError):
+        return []
+
+
 def _extract_name(node, source_lines: list[str]) -> str:
     """Extract the name of a node (function/class name)."""
     # Look for name/identifier child nodes
-    for child in node.children:
+    children = _get_node_children(node)
+    for child in children:
         if child.type in ("identifier", "name", "type_identifier", "property_identifier"):
             return source_lines[child.start_point[0]][
                 child.start_point[1] : child.end_point[1]
             ]
     # For decorated definitions, look deeper
-    for child in node.children:
+    for child in children:
         if child.type in CHUNK_NODE_TYPES.get("python", set()) | DEFAULT_CHUNK_TYPES:
             return _extract_name(child, source_lines)
     return "<anonymous>"
@@ -324,16 +358,110 @@ def _collect_chunks(
 
         # Recurse into children for nested definitions (e.g., methods in a class)
         current_name = f"{parent_name}.{name}" if parent_name else name
-        for child in node.children:
+        for child in _get_node_children(node):
             chunks.extend(
                 _collect_chunks(child, source_lines, language, filepath, current_name)
             )
     else:
         # Not a chunk node — recurse into children
-        for child in node.children:
+        for child in _get_node_children(node):
             chunks.extend(
                 _collect_chunks(child, source_lines, language, filepath, parent_name)
             )
+
+    return chunks
+
+
+def _collect_chunks_cursor(
+    tree,
+    source_lines: list[str],
+    language: str,
+    filepath: str,
+) -> list[Chunk]:
+    """Collect semantic chunks using TreeCursor walk (fallback method).
+
+    Uses a non-recursive cursor-based walk which is more reliable across
+    different tree-sitter versions.
+    """
+    chunks = []
+    chunk_types = CHUNK_NODE_TYPES.get(language, DEFAULT_CHUNK_TYPES)
+
+    cursor = tree.walk()
+
+    # Build a parent name stack for scope tracking
+    # We walk the tree depth-first using the cursor
+    visited = set()
+    parent_stack: list[str] = []
+    depth_stack: list[int] = []
+
+    def _process_node(node, parent_name: Optional[str] = None):
+        if node.type in chunk_types:
+            name = _extract_name(node, source_lines)
+            kind = _node_kind(node.type)
+            start_line = node.start_point[0] + 1
+            end_line = node.end_point[0] + 1
+            content_text = "\n".join(
+                source_lines[node.start_point[0] : node.end_point[0] + 1]
+            )
+
+            if parent_name:
+                scope = f"{filepath}::{parent_name}.{name}"
+            else:
+                scope = f"{filepath}::{name}"
+
+            chunks.append(
+                Chunk(
+                    name=name,
+                    kind=kind,
+                    start_line=start_line,
+                    end_line=end_line,
+                    content=content_text,
+                    scope_context=scope,
+                )
+            )
+            return name
+        return None
+
+    # Depth-first traversal using cursor
+    current_depth = 0
+    reached = True
+
+    while reached:
+        node = cursor.node
+        node_id = id(node)
+
+        if node_id not in visited:
+            visited.add(node_id)
+
+            # Trim parent stack to current depth
+            while depth_stack and depth_stack[-1] >= current_depth:
+                depth_stack.pop()
+                parent_stack.pop()
+
+            parent_name = parent_stack[-1] if parent_stack else None
+            chunk_name = _process_node(node, parent_name)
+
+            if chunk_name:
+                parent_stack.append(
+                    f"{parent_name}.{chunk_name}" if parent_name else chunk_name
+                )
+                depth_stack.append(current_depth)
+
+        if cursor.goto_first_child():
+            current_depth += 1
+            continue
+        if cursor.goto_next_sibling():
+            continue
+        # Go back up
+        retracing = True
+        while retracing:
+            if not cursor.goto_parent():
+                retracing = False
+                reached = False
+            else:
+                current_depth -= 1
+                if cursor.goto_next_sibling():
+                    retracing = False
 
     return chunks
 
@@ -353,9 +481,15 @@ def chunk_file_treesitter(filepath: Path, content: str, language: str) -> list[C
     source_lines = content.splitlines()
     rel_path = str(filepath)
 
+    # Try the recursive node.children approach first
     chunks = _collect_chunks(tree.root_node, source_lines, language, rel_path)
 
-    # If no semantic chunks found, fall back to module-level chunk
+    # If that didn't find anything, try cursor-based traversal
+    # (more robust across tree-sitter API versions)
+    if not chunks and content.strip():
+        chunks = _collect_chunks_cursor(tree, source_lines, language, rel_path)
+
+    # If still no semantic chunks found, fall back to module-level chunk
     if not chunks and content.strip():
         chunks = [
             Chunk(
@@ -367,6 +501,115 @@ def chunk_file_treesitter(filepath: Path, content: str, language: str) -> list[C
                 scope_context=rel_path,
             )
         ]
+
+    return chunks
+
+
+# -- Regex-based fallback for when tree-sitter is unavailable --
+
+# Patterns for extracting definitions from source code via regex
+_REGEX_PATTERNS: dict[str, list[tuple[str, str]]] = {
+    "python": [
+        (r"^(class)\s+(\w+)", "class"),
+        (r"^(def)\s+(\w+)", "function"),
+        (r"^(@\w[\w.]*\s*(?:\(.*?\)\s*)*\n(?:@\w[\w.]*\s*(?:\(.*?\)\s*)*\n)*)?(def)\s+(\w+)", "function"),
+    ],
+    "javascript": [
+        (r"^(?:export\s+)?function\s+(\w+)", "function"),
+        (r"^(?:export\s+)?class\s+(\w+)", "class"),
+        (r"^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:\([^)]*\)|[^=])\s*=>", "function"),
+    ],
+    "typescript": [
+        (r"^(?:export\s+)?function\s+(\w+)", "function"),
+        (r"^(?:export\s+)?class\s+(\w+)", "class"),
+        (r"^(?:export\s+)?interface\s+(\w+)", "interface"),
+        (r"^(?:export\s+)?type\s+(\w+)", "type"),
+        (r"^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:\([^)]*\)|[^=])\s*=>", "function"),
+    ],
+    "rust": [
+        (r"^(?:pub\s+)?fn\s+(\w+)", "function"),
+        (r"^(?:pub\s+)?struct\s+(\w+)", "class"),
+        (r"^(?:pub\s+)?enum\s+(\w+)", "enum"),
+        (r"^(?:pub\s+)?trait\s+(\w+)", "interface"),
+        (r"^impl(?:<[^>]*>)?\s+(\w+)", "impl"),
+    ],
+    "go": [
+        (r"^func\s+(\w+)", "function"),
+        (r"^func\s+\([^)]+\)\s+(\w+)", "function"),
+        (r"^type\s+(\w+)\s+struct", "class"),
+        (r"^type\s+(\w+)\s+interface", "interface"),
+        (r"^type\s+(\w+)", "type"),
+    ],
+    "java": [
+        (r"^\s*(?:public|private|protected)?\s*(?:static\s+)?class\s+(\w+)", "class"),
+        (r"^\s*(?:public|private|protected)?\s*(?:static\s+)?interface\s+(\w+)", "interface"),
+        (r"^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:\w+\s+)+(\w+)\s*\(", "function"),
+    ],
+}
+
+
+def _chunk_file_regex(filepath: Path, content: str, language: str) -> list[Chunk]:
+    """Extract chunks using regex patterns when tree-sitter is unavailable."""
+    patterns = _REGEX_PATTERNS.get(language)
+    if not patterns:
+        return []
+
+    lines = content.splitlines()
+    if not lines:
+        return []
+
+    rel_path = str(filepath)
+
+    # Find all definition start lines
+    definitions: list[tuple[int, str, str]] = []  # (line_idx, name, kind)
+    for line_idx, line in enumerate(lines):
+        stripped = line.lstrip()
+        for pattern, kind in patterns:
+            m = re.match(pattern, stripped)
+            if m:
+                # The name is the last group in the match
+                name = m.group(m.lastindex)
+                definitions.append((line_idx, name, kind))
+                break  # Only match one pattern per line
+
+    if not definitions:
+        return []
+
+    # Determine the end of each definition: next definition at same or lower
+    # indent, or end of file
+    chunks = []
+    for i, (start_idx, name, kind) in enumerate(definitions):
+        # Find end of this definition
+        if i + 1 < len(definitions):
+            # Look for the end: either next definition start or a blank line
+            # before the next definition
+            next_start = definitions[i + 1][0]
+            end_idx = next_start
+            # Walk backwards from next definition to find blank line separator
+            for j in range(next_start - 1, start_idx, -1):
+                if not lines[j].strip():
+                    end_idx = j
+                    break
+        else:
+            end_idx = len(lines)
+
+        # Trim trailing blank lines
+        while end_idx > start_idx + 1 and not lines[end_idx - 1].strip():
+            end_idx -= 1
+
+        chunk_content = "\n".join(lines[start_idx:end_idx])
+        scope = f"{rel_path}::{name}"
+
+        chunks.append(
+            Chunk(
+                name=name,
+                kind=kind,
+                start_line=start_idx + 1,
+                end_line=end_idx,
+                content=chunk_content,
+                scope_context=scope,
+            )
+        )
 
     return chunks
 
@@ -438,7 +681,18 @@ def chunk_file(filepath: Path, content: str) -> list[Chunk]:
     if language:
         chunks = chunk_file_treesitter(filepath, content, language)
         if chunks:
+            # If tree-sitter only returned a single module-level chunk,
+            # try regex-based extraction for better granularity
+            if len(chunks) == 1 and chunks[0].kind == "module":
+                regex_chunks = _chunk_file_regex(filepath, content, language)
+                if regex_chunks:
+                    return regex_chunks
             return chunks
+
+        # Tree-sitter returned nothing; try regex-based chunking
+        regex_chunks = _chunk_file_regex(filepath, content, language)
+        if regex_chunks:
+            return regex_chunks
 
     # Fallback for unsupported or failed parsing
     return chunk_file_fallback(filepath, content)

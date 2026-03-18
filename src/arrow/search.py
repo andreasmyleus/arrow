@@ -202,6 +202,30 @@ class HybridSearcher:
 
         return results
 
+    def estimate_budget(
+        self, query: str, project_id: Optional[int] = None
+    ) -> int:
+        """Estimate optimal token budget based on query complexity.
+
+        Simple symbol lookups need ~500 tokens. Broad architectural
+        questions need ~8000+. Uses FTS hit count as a proxy for scope.
+        """
+        hit_count = self.storage.count_fts_hits(query, project_id=project_id)
+        word_count = len(query.split())
+
+        # Heuristics for budget estimation
+        if hit_count <= 2 and word_count <= 3:
+            return 500   # Simple symbol lookup
+        if hit_count <= 5 and word_count <= 4:
+            return 1500  # Focused question
+        if hit_count <= 15:
+            return 3000  # Moderate scope
+        if hit_count <= 30:
+            return 5000  # Broad question
+        if hit_count <= 60:
+            return 8000  # Architectural review
+        return 12000     # Very broad / exploratory
+
     def get_context(
         self, query: str, token_budget: int = 8000,
         project_id: Optional[int] = None,
