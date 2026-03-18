@@ -512,6 +512,9 @@ def search_structure(
         JSON array of matching symbol definitions.
     """
     storage = _get_storage()
+    if not symbol or not symbol.strip():
+        return json.dumps({"error": "symbol is required"})
+
     if not storage.list_projects():
         return json.dumps({
             "error": "No projects indexed yet. Run index_codebase(path) first."
@@ -519,7 +522,7 @@ def search_structure(
 
     project_id = _resolve_project_id(project)
     symbols = storage.search_symbols(
-        symbol, kind=kind if kind != "any" else None, project_id=project_id
+        symbol.strip(), kind=kind if kind != "any" else None, project_id=project_id
     )
 
     output = []
@@ -576,8 +579,8 @@ def trace_dependencies(
     return json.dumps({
         "file": file,
         "language": file_rec.language,
-        "imports": [row[0] for row in imports],
-        "imported_by": [row[0] for row in importers],
+        "imports": [row[0] for row in imports if row[0]],
+        "imported_by": [row[0] for row in importers if row[0]],
         "depth": depth,
     }, indent=2)
 
@@ -875,12 +878,21 @@ def what_breaks_if_i_change(
             and c.name and c.name != "<anonymous>"
         ]
 
+    # Extensions for non-code files that won't "break" from code changes
+    _NON_CODE_EXTS = {".md", ".json", ".yaml", ".yml", ".toml", ".csv", ".xml",
+                      ".txt", ".rst", ".html", ".css", ".svg", ".lock"}
+
     # Find all callers for each symbol
     all_callers = []
     seen = set()
     for sym in target_symbols:
         callers = storage.get_callers_of_symbol(sym, project_id=effective_pid)
         for caller in callers:
+            # Skip non-code files (docs, data) — they reference the symbol
+            # textually but won't break from a code change
+            ext = Path(caller["file_path"]).suffix.lower()
+            if ext in _NON_CODE_EXTS:
+                continue
             key = (caller["file_path"], caller["name"])
             if key not in seen:
                 seen.add(key)

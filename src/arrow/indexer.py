@@ -708,7 +708,9 @@ def _extract_imports(lines: list[str], language: str) -> list[str]:
                 parts = stripped.split()
                 if len(parts) >= 4 and parts[2] == "import":
                     mod = parts[1]
-                    imports.append(mod.split(".")[0])
+                    base = mod.split(".")[0]
+                    if base:  # Skip empty base from relative imports like "from .foo"
+                        imports.append(base)
                     if "." in mod:
                         imports.append(mod)
                     # Also record imported names
