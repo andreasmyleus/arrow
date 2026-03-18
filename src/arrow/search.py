@@ -118,24 +118,41 @@ class HybridSearcher:
         # Reciprocal rank fusion
         fused = reciprocal_rank_fusion(ranked_lists)
 
-        # Fetch chunks and build results
+        # Batch fetch chunks and files to avoid N+1 queries
+        top = fused[:limit]
+        chunk_ids = [cid for cid, _ in top]
+        chunks_map = {
+            c.id: c for c in self.storage.get_chunks_by_ids(chunk_ids)
+        }
+
+        # Batch fetch files
+        file_ids = list({c.file_id for c in chunks_map.values()})
+        files_map = {}
+        for fid in file_ids:
+            rec = self.storage.get_file_by_id(fid)
+            if rec:
+                files_map[fid] = rec.path
+
         results = []
-        for chunk_id, score in fused[:limit]:
-            chunk = self.storage.get_chunk_by_id(chunk_id)
+        for chunk_id, score in top:
+            chunk = chunks_map.get(chunk_id)
             if chunk is None:
                 continue
 
-            file_rec = self.storage.get_file_by_id(chunk.file_id)
-            file_path = file_rec.path if file_rec else ""
+            file_path = files_map.get(chunk.file_id, "")
 
-            try:
-                content = (
-                    decompress_content(chunk.content)
-                    if isinstance(chunk.content, bytes)
-                    else str(chunk.content)
-                )
-            except Exception:
-                content = "<decompression error>"
+            # Use content_text (plain text) if available, avoid decompression
+            if chunk.content_text:
+                content = chunk.content_text
+            else:
+                try:
+                    content = (
+                        decompress_content(chunk.content)
+                        if isinstance(chunk.content, bytes)
+                        else str(chunk.content)
+                    )
+                except Exception:
+                    content = "<decompression error>"
 
             results.append(
                 SearchResult(
@@ -168,41 +185,46 @@ class HybridSearcher:
                 "chunks": [],
             }
 
-        # Greedily fill the token budget with highest-ranked chunks
+        # Greedily fill the token budget with highest-ranked chunks.
+        # Use pre-computed token_count from DB to avoid expensive tiktoken calls.
+        # Header overhead is ~15 tokens per chunk (file path + line numbers).
+        HEADER_OVERHEAD = 15
         selected = []
         tokens_used = 0
 
         for result in results:
-            # Build context string with scope info
-            header = f"// {result.file_path}:{result.chunk.start_line}-{result.chunk.end_line}"
-            chunk_text = f"{header}\n{result.content}"
-            chunk_tokens = count_tokens(chunk_text)
+            chunk_tokens = (result.chunk.token_count or 0) + HEADER_OVERHEAD
 
             if tokens_used + chunk_tokens > token_budget:
-                # Try to fit with truncation if it's close
-                remaining = token_budget - tokens_used
+                # Try to fit a truncated version of this chunk
+                remaining = token_budget - tokens_used - HEADER_OVERHEAD
                 if remaining > 100:
-                    # Truncate to fit
-                    lines = result.content.splitlines()
-                    truncated = []
-                    t_tokens = count_tokens(header + "\n")
-                    for line in lines:
-                        line_tokens = count_tokens(line + "\n")
-                        if t_tokens + line_tokens > remaining:
-                            break
-                        truncated.append(line)
-                        t_tokens += line_tokens
-                    if truncated:
+                    # Estimate truncation by character ratio
+                    content = result.content
+                    total_chars = len(content)
+                    total_toks = result.chunk.token_count or 1
+                    chars_per_tok = total_chars / total_toks
+                    target_chars = int(remaining * chars_per_tok)
+
+                    # Find a clean line break near the target
+                    truncated = content[:target_chars]
+                    last_nl = truncated.rfind("\n")
+                    if last_nl > 0:
+                        truncated = truncated[:last_nl]
+
+                    if truncated.strip():
+                        # Estimate tokens from char ratio
+                        est_tokens = int(len(truncated) / chars_per_tok) + HEADER_OVERHEAD
                         selected.append({
                             "file": result.file_path,
                             "name": result.chunk.name,
                             "kind": result.chunk.kind,
                             "lines": f"{result.chunk.start_line}-{result.chunk.end_line}",
-                            "content": "\n".join(truncated),
+                            "content": truncated,
                             "truncated": True,
-                            "tokens": t_tokens,
+                            "tokens": est_tokens,
                         })
-                        tokens_used += t_tokens
+                        tokens_used += est_tokens
                 break  # Budget full
 
             selected.append({

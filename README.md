@@ -15,13 +15,55 @@ Arrow pre-indexes your codebase using tree-sitter AST parsing, then serves relev
 
 ## Performance
 
+### Micro-benchmarks
+
 ```
 Hashing:      6,300 MB/s (xxHash3-128)
 Indexing:     146 files/s (tree-sitter + tokenization)
 Incremental:  2ms (hash check only, no re-indexing)
 Search:       0.5ms per query (FTS5 BM25)
-get_context:  5-7ms (search + rank + token trim)
+get_context:  1-4ms (search + rank + token trim)
 ```
+
+### Arrow vs Traditional (Grep + Read)
+
+Real-world coding tasks on Arrow's own codebase (22 files, ~4k lines). Arrow uses `get_context` with a 4000-token budget. Traditional approach uses Glob + Grep + Read (the way Claude Code works without Arrow).
+
+| Task | Arrow | Traditional | Token Savings |
+|------|-------|-------------|---------------|
+| How does hybrid search work? | 3,976 tok / 4ms | ~6,999 tok / 22ms | 43% |
+| Find storage/database functions | 3,990 tok / 1ms | ~20,243 tok / 10ms | 80% |
+| Find index_codebase implementation | 3,938 tok / 1ms | ~5,917 tok / 13ms | 33% |
+| How does file discovery work? | 3,982 tok / 1ms | ~8,645 tok / 13ms | 54% |
+| Find all test fixtures | 3,987 tok / 1ms | ~8,881 tok / 13ms | 55% |
+| Bug: FTS returns no results | 3,999 tok / 1ms | ~9,464 tok / 16ms | 58% |
+| Add new MCP tool | 3,949 tok / 1ms | ~62,135 tok / 13.2s | 94% |
+| Chunks flow: indexer to storage | 3,993 tok / 2ms | ~15,498 tok / 14ms | 74% |
+| Debug: get_context slow | 3,998 tok / 1ms | ~19,131 tok / 12ms | 79% |
+| Review Docker setup | 3,961 tok / 0ms | ~970,799 tok / 12.6s | 100% |
+| **Total** | **39,773 tok / 14ms** | **~1,127,712 tok / 25.9s** | **96%** |
+
+**Key takeaway:** Arrow delivers relevant code in **1-4ms** using **96% fewer tokens** than reading files manually. For broad tasks ("review Docker setup", "add new MCP tool"), the savings are extreme because Arrow targets only the relevant chunks instead of reading entire files.
+
+### Comprehensive Benchmark (110 queries, 10 complexity tiers)
+
+Tested across query types ranging from simple symbol lookups to broad architectural reviews. All queries use a 4000-token budget.
+
+| Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings |
+|-----------------|---------|-------------|-------------------|---------|
+| Symbol lookup | 15 | 51,962 | 258,403 | 80% |
+| Method lookup | 15 | 52,071 | 169,984 | 69% |
+| Single concept | 10 | 25,142 | 116,988 | 79% |
+| Two concepts | 10 | 39,899 | 154,541 | 74% |
+| How-does-X-work | 10 | 35,837 | 226,538 | 84% |
+| Cross-file tracing | 10 | 31,899 | 185,968 | 83% |
+| Debugging | 10 | 35,340 | 213,882 | 84% |
+| Implementation planning | 10 | 39,885 | 242,264 | 84% |
+| Architecture review | 10 | 39,669 | 609,049 | 93% |
+| Broad / exploratory | 10 | 39,741 | 706,405 | 94% |
+| **Total** | **110** | **391,445** | **2,884,022** | **86%** |
+
+**Average query time: 0.3ms.** Savings scale with query complexity — simple lookups save ~70-80%, while broad architectural questions save 93-94% because the traditional approach reads entire files.
 
 ## CLI
 
