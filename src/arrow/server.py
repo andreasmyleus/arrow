@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB_DIR = Path.home() / ".arrow"
 DEFAULT_DB_PATH = DEFAULT_DB_DIR / "index.db"
 DEFAULT_VECTOR_PATH = DEFAULT_DB_DIR / "vectors.usearch"
+DEFAULT_CLONE_DIR = DEFAULT_DB_DIR / "clones"
 
 mcp = FastMCP(
     "arrow",
@@ -772,6 +773,150 @@ def index_github_content(
     indexer = _get_indexer()
     result = indexer.index_remote_files(owner, repo, branch, files)
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def index_github_repo(
+    owner: str, repo: str, branch: str = "main",
+    sparse_paths: list[str] | None = None,
+) -> str:
+    """Clone and index a GitHub repo using `gh` CLI. Fetches code automatically
+    so you don't need to read files first. Checks the index first and skips
+    if already up-to-date.
+
+    Uses shallow clone for speed. Optionally use sparse_paths to index only
+    specific directories (e.g. ["src/", "lib/"]).
+
+    Args:
+        owner: GitHub org or username (e.g. "anthropics").
+        repo: Repository name (e.g. "claude-code").
+        branch: Branch name (default "main").
+        sparse_paths: Optional list of paths to clone (sparse checkout).
+                      Omit to clone the entire repo.
+
+    Returns:
+        JSON status with file/chunk counts, timing, and clone path.
+    """
+    import shutil
+    import tempfile
+
+    name = f"{owner}/{repo}"
+    storage = _get_storage()
+
+    # Check if already indexed and fresh
+    existing = storage.get_project_by_name(name)
+    if existing and existing.git_branch == branch and existing.last_indexed:
+        # Check if the remote has new commits
+        try:
+            result = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/commits/{branch}",
+                 "--jq", ".sha"],
+                capture_output=True, text=True, timeout=10,
+            )
+            remote_sha = result.stdout.strip()
+            if remote_sha and existing.git_commit == remote_sha:
+                return json.dumps({
+                    "status": "already indexed",
+                    "project": name,
+                    "branch": branch,
+                    "commit": remote_sha[:8],
+                    "last_indexed": existing.last_indexed,
+                    "hint": (
+                        "Index is up-to-date. Use search_code() or "
+                        "get_context() with project=\""
+                        f"{name}\" to search."
+                    ),
+                }, indent=2)
+        except Exception:
+            pass  # Can't check, proceed with clone
+
+    # Clone to a persistent location so re-indexes are incremental
+    clone_dir = DEFAULT_CLONE_DIR / owner / repo
+    clone_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    if clone_dir.is_dir():
+        # Update existing clone
+        try:
+            subprocess.run(
+                ["git", "-C", str(clone_dir), "fetch", "origin", branch,
+                 "--depth=1"],
+                capture_output=True, text=True, timeout=60,
+            )
+            subprocess.run(
+                ["git", "-C", str(clone_dir), "checkout",
+                 f"origin/{branch}", "--force"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except Exception:
+            # If update fails, remove and re-clone
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            clone_dir = None
+
+    if not clone_dir or not clone_dir.is_dir():
+        clone_dir = DEFAULT_CLONE_DIR / owner / repo
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        clone_cmd = [
+            "gh", "repo", "clone", f"{owner}/{repo}", str(clone_dir),
+            "--", "--depth=1", f"--branch={branch}",
+        ]
+        if sparse_paths:
+            clone_cmd.extend(["--sparse"])
+
+        try:
+            result = subprocess.run(
+                clone_cmd, capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                return json.dumps({
+                    "error": f"Clone failed: {result.stderr.strip()}",
+                    "hint": "Is `gh` CLI installed and authenticated? "
+                            "Run `gh auth status` to check.",
+                })
+        except FileNotFoundError:
+            return json.dumps({
+                "error": "`gh` CLI not found. Install it: "
+                         "https://cli.github.com/",
+            })
+        except subprocess.TimeoutExpired:
+            return json.dumps({
+                "error": "Clone timed out (120s). Try with sparse_paths "
+                         "to clone only specific directories.",
+            })
+
+        # Set up sparse checkout if needed
+        if sparse_paths and clone_dir.is_dir():
+            subprocess.run(
+                ["git", "-C", str(clone_dir),
+                 "sparse-checkout", "set"] + sparse_paths,
+                capture_output=True, text=True, timeout=30,
+            )
+
+    # Index the cloned repo
+    indexer = _get_indexer()
+    idx_result = indexer.index_codebase(clone_dir)
+
+    # Rename project to owner/repo format
+    pid = idx_result.get("project_id")
+    if pid:
+        proj = storage.get_project(pid)
+        if proj and proj.name != name:
+            try:
+                storage.conn.execute(
+                    "UPDATE projects SET name = ? WHERE id = ?",
+                    (name, pid),
+                )
+                storage.conn.commit()
+                idx_result["project_name"] = name
+            except Exception:
+                pass  # Name conflict, keep auto-detected name
+
+    idx_result["clone_path"] = str(clone_dir)
+    idx_result["hint"] = (
+        f"Indexed. Use search_code() or get_context() with "
+        f"project=\"{idx_result.get('project_name', name)}\" to search."
+    )
+    return json.dumps(idx_result, indent=2)
 
 
 @mcp.tool()

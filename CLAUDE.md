@@ -18,6 +18,15 @@ Use these MCP tools BEFORE reading files manually:
 - `store_memory(key, content)` / `recall_memory(query)` — persist knowledge across sessions
 - `context_pressure()` — check context window usage
 - `list_projects()` — see all indexed repos
+- `index_github_repo(owner, repo)` — clone + index a remote GitHub repo (uses `gh` CLI)
+
+## Remote Repos
+
+When you need code from a GitHub repo:
+1. **Always check the index first** — use `search_code(query, project="owner/repo")` or `get_context(query, project="owner/repo")`
+2. **If not indexed**, use `index_github_repo(owner, repo)` to clone and index it in one step
+3. **Never manually fetch + pass files** — `index_github_repo` handles cloning, caching, and incremental updates automatically
+4. The clone is cached at `~/.arrow/clones/` so subsequent indexes are fast incremental updates
 
 ## Development
 
@@ -31,7 +40,7 @@ Use these MCP tools BEFORE reading files manually:
 - `storage.py` — SQLite WAL database, schema, all data access
 - `indexer.py` — tree-sitter AST chunking, incremental indexing
 - `search.py` — hybrid BM25 + vector search, reciprocal rank fusion, token budgeting
-- `server.py` — MCP server with 27 tools, file watchers, session tracking
+- `server.py` — MCP server with 28 tools, file watchers, session tracking
 - `chunker.py` — tree-sitter parsing into semantic chunks (functions, classes)
 - `embedder.py` — ONNX Jina embeddings for vector search
 - `vector_store.py` — usearch vector index
