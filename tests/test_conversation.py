@@ -42,8 +42,7 @@ class TestConversationContext:
         from arrow.server import context_pressure
         result = json.loads(context_pressure())
         assert "session_tokens" in result
-        assert "compact_threshold" in result
-        assert "context_pressure_pct" in result
+        assert "chunks_sent" in result
         assert result["status"] in (
             "low", "moderate", "high", "critical"
         )

@@ -1743,124 +1743,27 @@ _session_id: str = str(uuid.uuid4())
 
 @mcp.tool()
 def context_pressure() -> str:
-    """Check current context window pressure.
+    """Check current context window usage stats.
 
-    Shows how many tokens have been sent this session, the
-    compact threshold, and a percentage. Use this to decide
-    whether to call compact_context().
+    Shows how many tokens have been sent this session and how
+    many unique chunks. Useful for monitoring session activity.
 
     Returns:
-        JSON with session token stats and pressure percentage.
+        JSON with session token stats.
     """
     storage = _get_storage()
     session_tokens = storage.get_session_token_total(_session_id)
     sent_ids = storage.get_sent_chunk_ids(_session_id)
-    threshold = int(os.environ.get(
-        "ARROW_COMPACT_THRESHOLD", str(_COMPACT_THRESHOLD)
-    )) or _COMPACT_THRESHOLD
-    pct = round(session_tokens / threshold * 100, 1)
 
     return json.dumps({
         "session_id": _session_id,
         "session_tokens": session_tokens,
-        "compact_threshold": threshold,
-        "context_pressure_pct": pct,
         "chunks_sent": len(sent_ids),
         "status": (
-            "critical" if pct > 90
-            else "high" if pct > 70
-            else "moderate" if pct > 40
+            "critical" if session_tokens > 230_000
+            else "high" if session_tokens > 180_000
+            else "moderate" if session_tokens > 100_000
             else "low"
-        ),
-        "recommendation": (
-            "Call compact_context() to free space"
-            if pct > 70
-            else "Context budget is healthy"
-        ),
-    }, indent=2)
-
-
-@mcp.tool()
-def compact_context(
-    reset: bool = False,
-) -> str:
-    """Get a compacted summary of all context sent this session.
-
-    Returns signatures and metadata for all previously-sent code
-    chunks, dramatically reducing token usage. Optionally resets
-    the session to start fresh.
-
-    Args:
-        reset: If True, clear session history after compacting.
-
-    Returns:
-        JSON with compacted context summary.
-    """
-    storage = _get_storage()
-    session_tokens = storage.get_session_token_total(_session_id)
-    details = storage.get_session_chunks_detail(_session_id)
-
-    if not details:
-        return json.dumps({
-            "session_tokens": 0,
-            "chunks": 0,
-            "message": "No context sent yet in this session.",
-        })
-
-    # Group by file
-    file_chunks: dict[int, list[dict]] = {}
-    for det in details:
-        fid = det["file_id"]
-        if fid not in file_chunks:
-            file_chunks[fid] = []
-        file_chunks[fid].append(det)
-
-    compact_items = []
-    compact_tokens = 0
-    for fid, chunks in file_chunks.items():
-        file_rec = storage.get_file_by_id(fid)
-        if not file_rec:
-            continue
-        for chunk in chunks:
-            content = chunk.get("content_text", "") or ""
-            lines = content.strip().split("\n")
-            sig_lines = []
-            for line in lines[:5]:
-                sig_lines.append(line)
-                if line.rstrip().endswith((":", "{", "->")):
-                    break
-            signature = "\n".join(sig_lines)
-            est = max(int(chunk.get("tokens_sent", 0) * 0.1), 5)
-            compact_items.append({
-                "file": file_rec.path,
-                "name": chunk["name"],
-                "kind": chunk["kind"],
-                "lines": (
-                    f"{chunk['start_line']}-{chunk['end_line']}"
-                ),
-                "signature": signature,
-                "original_tokens": chunk.get("tokens_sent", 0),
-            })
-            compact_tokens += est
-
-    if reset:
-        storage.clear_session(_session_id)
-
-    return json.dumps({
-        "session_tokens_before": session_tokens,
-        "compact_tokens": compact_tokens,
-        "savings_pct": round(
-            (1 - compact_tokens / max(session_tokens, 1)) * 100,
-            1,
-        ),
-        "files": len(file_chunks),
-        "chunks": len(compact_items),
-        "reset": reset,
-        "items": compact_items,
-        "hint": (
-            "Session cleared — future queries return full code."
-            if reset
-            else "Use compact_context(reset=True) to clear."
         ),
     }, indent=2)
 

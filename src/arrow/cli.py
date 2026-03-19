@@ -564,32 +564,9 @@ def cmd_pressure(args):
     from .server import context_pressure
     result = json.loads(context_pressure())
 
-    print(f"Context pressure: {result['context_pressure_pct']}%"
-          f" ({result['status']})")
-    print(f"  Session tokens: {result['session_tokens']:,}"
-          f" / {result['compact_threshold']:,}")
+    print(f"Context pressure: {result['status']}")
+    print(f"  Session tokens: {result['session_tokens']:,}")
     print(f"  Chunks sent:    {result['chunks_sent']}")
-    print(f"  {result['recommendation']}")
-
-
-def cmd_compact(args):
-    """Compact session context."""
-    _setup_logging("WARNING")
-
-    from .server import compact_context
-    result = json.loads(compact_context(reset=args.reset))
-
-    if "message" in result:
-        print(result["message"])
-        return
-
-    print(f"Compacted {result['chunks']} chunks "
-          f"across {result['files']} files")
-    print(f"  Before: {result['session_tokens_before']:,} tokens")
-    print(f"  After:  {result['compact_tokens']:,} tokens"
-          f" ({result['savings_pct']}% savings)")
-    if args.reset:
-        print("  Session cleared.")
 
 
 def cmd_remember(args):
@@ -832,15 +809,6 @@ def main():
     subparsers.add_parser(
         "pressure", help="Show context window pressure"
     ).set_defaults(func=cmd_pressure)
-
-    p_compact = subparsers.add_parser(
-        "compact", help="Compact session context"
-    )
-    p_compact.add_argument(
-        "--reset", action="store_true",
-        help="Clear session history after compacting",
-    )
-    p_compact.set_defaults(func=cmd_compact)
 
     p_remember = subparsers.add_parser(
         "remember", help="Store a memory"
