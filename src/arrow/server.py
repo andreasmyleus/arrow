@@ -366,6 +366,8 @@ def index_codebase(path: str, force: bool = False) -> str:
     Returns:
         JSON status with file/chunk counts, project info, git metadata, and timing.
     """
+    if not path or not path.strip():
+        return json.dumps({"error": "path is required"})
     root = Path(path).resolve()
     if not root.is_dir():
         return json.dumps({"error": f"Not a directory: {path}"})
@@ -521,6 +523,8 @@ def get_context(
     Returns:
         JSON with the most relevant code chunks within the token budget.
     """
+    if token_budget < 0:
+        return json.dumps({"error": "token_budget must be >= 0 (0 = auto)"})
     storage = _get_storage()
     err = _ensure_indexed()
     if err:
@@ -828,6 +832,13 @@ def index_github_content(
         return json.dumps({"error": "branch is required"})
     if not files:
         return json.dumps({"error": "files list is required and must not be empty"})
+    for idx, entry in enumerate(files):
+        if not isinstance(entry, dict) or "path" not in entry:
+            return json.dumps(
+                {"error": f"files[{idx}] must have 'path' and 'content' keys"}
+            )
+        if not entry["path"] or not entry["path"].strip():
+            return json.dumps({"error": f"files[{idx}].path must not be empty"})
 
     indexer = _get_indexer()
     result = indexer.index_remote_files(owner, repo, branch, files)
@@ -1091,6 +1102,8 @@ def get_diff_context(
     Returns:
         JSON with changed functions, their callers, dependent files, and code.
     """
+    if not file or not file.strip():
+        return json.dumps({"error": "file path is required"})
     storage = _get_storage()
     project_id = _resolve_project_id(project)
 
@@ -1204,6 +1217,8 @@ def what_breaks_if_i_change(
     Returns:
         JSON impact report with callers, tests, dependents, and risk assessment.
     """
+    if not file or not file.strip():
+        return json.dumps({"error": "file path is required"})
     storage = _get_storage()
     project_id = _resolve_project_id(project)
 
