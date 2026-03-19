@@ -466,6 +466,77 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
 
 
 @mcp.tool()
+def search_regex(
+    pattern: str, limit: int = 20, project: str | None = None
+) -> str:
+    """Search indexed code with a regex pattern.
+
+    Unlike search_code (which uses BM25 + vector similarity), this does
+    exact regex matching against chunk content. Useful for finding specific
+    patterns like error codes, magic strings, or complex expressions.
+
+    Args:
+        pattern: Python regex pattern (e.g. r"def test_.*auth").
+        limit: Maximum results (default 20).
+        project: Optional project name to scope search.
+
+    Returns:
+        Matching code chunks with highlighted pattern context.
+    """
+    if not pattern or not pattern.strip():
+        return json.dumps({"error": "pattern is required"})
+    if limit <= 0:
+        return json.dumps({"error": "limit must be a positive integer"})
+    limit = min(limit, 100)
+
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        return json.dumps({"error": f"Invalid regex: {exc}"})
+
+    err = _ensure_indexed()
+    if err:
+        return err
+
+    storage = _get_storage()
+    project_id = _resolve_project_id(project)
+    err = _check_project_id(project_id, project) if project else None
+    if err:
+        return err
+
+    t0 = time.time()
+    matches = storage.search_regex(
+        pattern, limit=limit, project_id=project_id
+    )
+    latency = (time.time() - t0) * 1000
+
+    storage.record_tool_call(
+        "search_regex", latency, project_id=project_id
+    )
+
+    chunks = []
+    for chunk in matches:
+        file_rec = storage.get_file_by_id(chunk.file_id)
+        proj = (
+            storage.get_project(chunk.project_id)
+            if chunk.project_id else None
+        )
+        chunks.append({
+            "file": file_rec.path if file_rec else "",
+            "project": proj.name if proj else "",
+            "name": chunk.name,
+            "kind": chunk.kind,
+            "lines": f"{chunk.start_line}-{chunk.end_line}",
+            "content": chunk.content_text or "",
+            "tokens": chunk.token_count or 0,
+        })
+
+    return f"Regex /{pattern}/ — {len(chunks)} matches\n\n" + _fmt_chunks(
+        chunks
+    )
+
+
+@mcp.tool()
 def get_context(
     query: str, token_budget: int = 0, project: str | None = None
 ) -> str:

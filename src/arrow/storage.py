@@ -752,6 +752,33 @@ class Storage:
         except Exception:
             return []
 
+    def search_regex(
+        self, pattern: str, limit: int = 50,
+        project_id: Optional[int] = None,
+    ) -> list[ChunkRecord]:
+        """Search chunk content with a regex pattern."""
+        if project_id is not None:
+            rows = self.conn.execute(
+                "SELECT * FROM chunks WHERE project_id = ?",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM chunks").fetchall()
+        import re
+        try:
+            compiled = re.compile(pattern)
+        except re.error:
+            return []
+        matches = []
+        for row in rows:
+            rec = ChunkRecord(**dict(row))
+            text = rec.content_text or ""
+            if compiled.search(text):
+                matches.append(rec)
+                if len(matches) >= limit:
+                    break
+        return matches
+
     def get_chunk_by_id(self, chunk_id: int) -> Optional[ChunkRecord]:
         row = self.conn.execute(
             "SELECT * FROM chunks WHERE id = ?", (chunk_id,)
