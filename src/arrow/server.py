@@ -551,7 +551,7 @@ def get_context(
     # Auto-compact if session exceeds threshold
     compact_threshold = int(os.environ.get(
         "ARROW_COMPACT_THRESHOLD", str(_COMPACT_THRESHOLD)
-    ))
+    )) or _COMPACT_THRESHOLD
     if session_tokens > compact_threshold:
         # Return compacted summary instead of full code
         return _compact_context_response(
@@ -670,6 +670,8 @@ def trace_dependencies(
     Returns:
         JSON dependency graph with imports and importers.
     """
+    if not file or not file.strip():
+        return json.dumps({"error": "file path is required"})
     storage = _get_storage()
     project_id = _resolve_project_id(project)
     file_rec = storage.get_file(file, project_id=project_id)
@@ -869,6 +871,11 @@ def index_github_repo(
     """
     import shutil
 
+    if not owner or not owner.strip():
+        return json.dumps({"error": "owner is required"})
+    if not repo or not repo.strip():
+        return json.dumps({"error": "repo is required"})
+
     name = f"{owner}/{repo}"
     storage = _get_storage()
 
@@ -1023,6 +1030,10 @@ def index_git_commit(path: str, ref: str) -> str:
     Returns:
         JSON status with file/chunk counts, commit info, and timing.
     """
+    if not path or not path.strip():
+        return json.dumps({"error": "path is required"})
+    if not ref or not ref.strip():
+        return json.dumps({"error": "ref is required"})
     root = Path(path).resolve()
     if not root.is_dir():
         return json.dumps({"error": f"Not a directory: {path}"})
@@ -1060,6 +1071,8 @@ def index_pr(path: str, pr_number: int) -> str:
         Use the project names with search_code() or get_context() to search
         either side of the PR.
     """
+    if not path or not path.strip():
+        return json.dumps({"error": "path is required"})
     if pr_number < 1:
         return json.dumps({"error": "pr_number must be a positive integer"})
 
@@ -1104,6 +1117,12 @@ def get_diff_context(
     """
     if not file or not file.strip():
         return json.dumps({"error": "file path is required"})
+    if line_start < 0 or line_end < 0:
+        return json.dumps({"error": "line_start and line_end must be >= 0"})
+    if line_start and line_end and line_start > line_end:
+        return json.dumps({
+            "error": f"line_start ({line_start}) must be <= line_end ({line_end})"
+        })
     storage = _get_storage()
     project_id = _resolve_project_id(project)
 
@@ -1137,13 +1156,6 @@ def get_diff_context(
                                 "lines": f"{chunk.start_line}-{chunk.end_line}",
                                 "content": chunk.content_text or "",
                             })
-
-    if line_start < 0 or line_end < 0:
-        return json.dumps({"error": "line_start and line_end must be >= 0"})
-    if line_start and line_end and line_start > line_end:
-        return json.dumps({
-            "error": f"line_start ({line_start}) must be <= line_end ({line_end})"
-        })
 
     if line_start and line_end:
         for chunk in chunks:
@@ -1719,6 +1731,12 @@ def import_index(bundle_json: str) -> str:
     from .chunker import compress_content
 
     proj_data = bundle["project"]
+    existing = storage.get_project_by_name(proj_data.get("name", ""))
+    if existing:
+        return json.dumps({
+            "error": f"Project '{proj_data['name']}' already exists. "
+                     "Remove it first with remove_project().",
+        })
     project_id = storage.create_project(
         name=proj_data["name"],
         remote_url=proj_data.get("remote_url"),
@@ -1853,7 +1871,7 @@ def context_pressure() -> str:
     sent_ids = storage.get_sent_chunk_ids(_session_id)
     threshold = int(os.environ.get(
         "ARROW_COMPACT_THRESHOLD", str(_COMPACT_THRESHOLD)
-    ))
+    )) or _COMPACT_THRESHOLD
     pct = round(session_tokens / threshold * 100, 1)
 
     return json.dumps({
@@ -2038,7 +2056,7 @@ def recall_memory(
             project_id=project_id, limit=limit,
         )
     except Exception:
-        # FTS match can fail on some query syntax
+        logger.debug("recall_memory FTS error for query %r", query, exc_info=True)
         results = []
 
     return json.dumps({

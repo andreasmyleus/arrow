@@ -85,7 +85,10 @@ def clean_server_state():
         watcher.stop()
     srv._watchers.clear()
     if srv._storage is not None:
-        srv._storage.close()
+        try:
+            srv._storage.close()
+        except Exception:
+            pass  # May fail if created on a different thread
 
 
 @pytest.fixture
