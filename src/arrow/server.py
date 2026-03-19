@@ -14,6 +14,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from .chunker import chunk_file
 from .config import get_config
 from .embedder import Embedder, get_embedder
 from .git_utils import get_diff_hunks, is_git_repo
@@ -202,20 +203,36 @@ def _check_project_id(project_id: int | None, project: str) -> str | None:
 
 
 def _ensure_indexed() -> str | None:
-    """Auto-index cwd if no projects are indexed. Returns error JSON or None.
+    """Auto-index cwd or refresh stale local projects. Returns error JSON or None.
 
-    When called and no projects exist, attempts to index the current
-    working directory (if it's a git repo) synchronously so the caller
-    can proceed. Returns an error string only if indexing is not possible.
+    - If no projects exist: index cwd (auto-detect git root).
+    - If local projects exist: do an incremental re-index so edits made
+      by the agent since the last tool call are picked up automatically.
+      The indexer skips unchanged files (hash check), so this is fast.
     """
     storage = _get_storage()
-    if storage.list_projects():
-        return None  # Already have indexed projects
+    projects = storage.list_projects()
+
+    if projects:
+        # Refresh local projects incrementally
+        indexer = _get_indexer()
+        for proj in projects:
+            if proj.root_path and not proj.is_remote:
+                root = Path(proj.root_path)
+                if root.is_dir():
+                    try:
+                        indexer.index_codebase(root)
+                    except Exception:
+                        logger.debug(
+                            "Incremental refresh failed for %s",
+                            proj.name,
+                        )
+        return None
 
     cwd = Path.cwd()
     if not cwd.is_dir():
         return json.dumps({
-            "error": "No projects indexed yet. Run index_codebase(path) first."
+            "error": "No projects indexed. Run index_codebase(path) first."
         })
 
     # Walk up to git root
@@ -236,7 +253,7 @@ def _ensure_indexed() -> str | None:
     except Exception:
         logger.exception("Auto-index failed for %s", cwd)
         return json.dumps({
-            "error": "No projects indexed yet. Run index_codebase(path) first."
+            "error": "No projects indexed. Run index_codebase(path) first."
         })
 
 
@@ -1097,6 +1114,36 @@ def get_diff_context(
                                 "lines": f"{chunk.start_line}-{chunk.end_line}",
                                 "content": chunk.content_text or "",
                             })
+
+            # If no indexed chunks matched, re-parse the current file on
+            # disk to pick up newly added or shifted functions.
+            if not changed_functions:
+                disk_path = root / file
+                if disk_path.is_file():
+                    disk_chunks = chunk_file(
+                        disk_path, disk_path.read_text()
+                    )
+                    for hunk in hunks:
+                        hunk_start = hunk["start"]
+                        hunk_end = hunk_start + hunk["count"]
+                        for dc in disk_chunks:
+                            if (dc.start_line <= hunk_end
+                                    and dc.end_line >= hunk_start
+                                    and dc.kind in (
+                                        "function", "method", "class",
+                                    )):
+                                name = dc.name or ""
+                                if name not in [
+                                    c["name"] for c in changed_functions
+                                ]:
+                                    changed_functions.append({
+                                        "name": name,
+                                        "kind": dc.kind,
+                                        "lines": (
+                                            f"{dc.start_line}-{dc.end_line}"
+                                        ),
+                                        "content": dc.content or "",
+                                    })
 
     if line_start and line_end:
         for chunk in chunks:
