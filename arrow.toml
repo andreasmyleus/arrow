@@ -1,0 +1,50 @@
+# Arrow Configuration
+# Place at ~/.arrow/config.toml or in your project root as arrow.toml
+#
+# All settings are optional — Arrow works out of the box with sensible defaults.
+# Uncomment and modify any setting you want to change.
+
+# ─── Search ─────────────────────────────────────────────────────────────────
+
+[search]
+
+# Maximum tokens to return from get_context().
+# 0 = unlimited (return all matching results, no truncation)
+# Set to e.g. 4000 to cap context size and save tokens.
+# Can always be overridden per-call with the token_budget parameter.
+token_budget = 0
+
+# Score multiplier for non-code files (markdown, json, yaml, toml, csv, xml).
+# Lower values push non-code results further down.
+# 0.0 = hide non-code entirely, 1.0 = treat same as code.
+non_code_penalty = 0.3
+
+# Boost recently accessed files in search results.
+# Useful when you're actively working on a set of files.
+frecency_boost = true
+
+# Maximum number of search results to consider before ranking.
+# Higher = more thorough but slower. Usually no need to change.
+max_results = 50
+
+
+# ─── Indexing ────────────────────────────────────────────────────────────────
+
+[index]
+
+# Automatically index the current working directory when no project is indexed.
+auto_index_cwd = true
+
+# Watch indexed files for changes and re-index automatically.
+watch_files = true
+
+# Skip files larger than this (in KB). Large generated files slow indexing.
+max_file_size_kb = 512
+
+
+# ─── Paths ───────────────────────────────────────────────────────────────────
+# Override where Arrow stores its data.
+# Environment variables ARROW_DB_PATH / ARROW_VECTOR_PATH take precedence.
+
+# db_path = "~/.arrow/index.db"
+# vector_path = "~/.arrow/vectors.usearch"

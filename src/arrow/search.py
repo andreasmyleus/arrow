@@ -9,6 +9,7 @@ from typing import Optional
 import tiktoken
 
 from .chunker import decompress_content
+from .config import get_config
 from .storage import ChunkRecord, Storage
 from .vector_store import VectorStore
 
@@ -16,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 # Non-code languages get a score penalty so they don't dominate search results
 _NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
-_NON_CODE_PENALTY = 0.3  # Multiply score by this factor
 
 _encoder: Optional[tiktoken.Encoding] = None
 
@@ -198,7 +198,7 @@ class HybridSearcher:
                 fid = penalty_chunks.get(cid)
                 frec = penalty_files.get(fid) if fid else None
                 if frec and frec.language in _NON_CODE_LANGS:
-                    score = score * _NON_CODE_PENALTY
+                    score = score * get_config().search.non_code_penalty
                 penalized.append((cid, score))
             fused = sorted(penalized, key=lambda x: x[1], reverse=True)
 

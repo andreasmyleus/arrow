@@ -14,6 +14,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from .config import get_config
 from .embedder import Embedder, get_embedder
 from .git_utils import get_diff_hunks, is_git_repo
 from .indexer import Indexer
@@ -54,7 +55,10 @@ _NON_CODE_EXTS = {".md", ".json", ".yaml", ".yml", ".toml", ".csv", ".xml",
 def _get_storage() -> Storage:
     global _storage
     if _storage is None:
-        db_path = os.environ.get("ARROW_DB_PATH", str(DEFAULT_DB_PATH))
+        cfg = get_config()
+        db_path = os.environ.get(
+            "ARROW_DB_PATH", cfg.db_path or str(DEFAULT_DB_PATH)
+        )
         _storage = Storage(db_path)
     return _storage
 
@@ -62,7 +66,10 @@ def _get_storage() -> Storage:
 def _get_vector_store() -> VectorStore:
     global _vector_store
     if _vector_store is None:
-        vec_path = os.environ.get("ARROW_VECTOR_PATH", str(DEFAULT_VECTOR_PATH))
+        cfg = get_config()
+        vec_path = os.environ.get(
+            "ARROW_VECTOR_PATH", cfg.vector_path or str(DEFAULT_VECTOR_PATH)
+        )
         _vector_store = VectorStore(vec_path)
     return _vector_store
 
@@ -476,12 +483,13 @@ def get_context(
 
     searcher = _get_searcher()
 
-    # Auto-estimate budget if not specified
+    # Resolve budget: caller arg > config > unlimited
+    cfg = get_config()
+    if token_budget <= 0:
+        token_budget = cfg.search.token_budget  # 0 = unlimited
     auto = token_budget <= 0
     if auto:
-        token_budget = searcher.estimate_budget(
-            query, project_id=project_id
-        )
+        token_budget = 999_999  # effectively unlimited
 
     # Conversation-aware: exclude already-sent chunks
     sent = storage.get_sent_chunk_ids(_session_id)
@@ -490,7 +498,7 @@ def get_context(
     t0 = time.time()
     context = searcher.get_context(
         query, token_budget=token_budget, project_id=project_id,
-        exclude_chunk_ids=sent, frecency_boost=True,
+        exclude_chunk_ids=sent, frecency_boost=cfg.search.frecency_boost,
     )
     latency = (time.time() - t0) * 1000
 
@@ -526,9 +534,10 @@ def get_context(
             "- Use file_summary() if you know the file path"
         )
 
+    budget_str = "unlimited" if auto else f"{context['token_budget']}t"
     meta = (
         f"query: {query}\n"
-        f"budget: {context['token_budget']}t ({context['budget_mode']}) "
+        f"budget: {budget_str} ({context['budget_mode']}) "
         f"| used: {context['tokens_used']}t "
         f"| {context['chunks_returned']}/{context['chunks_searched']} chunks"
     )

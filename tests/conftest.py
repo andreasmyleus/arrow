@@ -82,6 +82,7 @@ def project_dir(tmp_path):
 def clean_server_state():
     """Reset server global state between tests."""
     import arrow.server as srv
+    from arrow.config import reset_config
     srv._storage = None
     srv._indexer = None
     srv._vector_store = None
@@ -89,6 +90,7 @@ def clean_server_state():
     srv._searcher = None
     srv._watchers.clear()
     srv._project_locks.clear()
+    reset_config()
     yield
     for watcher in list(srv._watchers.values()):
         watcher.stop()
