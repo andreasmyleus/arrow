@@ -189,6 +189,45 @@ def _check_project_id(project_id: int | None, project: str) -> str | None:
     return None
 
 
+def _ensure_indexed() -> str | None:
+    """Auto-index cwd if no projects are indexed. Returns error JSON or None.
+
+    When called and no projects exist, attempts to index the current
+    working directory (if it's a git repo) synchronously so the caller
+    can proceed. Returns an error string only if indexing is not possible.
+    """
+    storage = _get_storage()
+    if storage.list_projects():
+        return None  # Already have indexed projects
+
+    cwd = Path.cwd()
+    if not cwd.is_dir():
+        return json.dumps({
+            "error": "No projects indexed yet. Run index_codebase(path) first."
+        })
+
+    # Walk up to git root
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        cwd = Path(result.stdout.strip())
+    except Exception:
+        pass  # Use cwd as-is
+
+    try:
+        indexer = _get_indexer()
+        indexer.index_codebase(cwd)
+        logger.info("Auto-indexed %s on first tool call", cwd)
+        return None
+    except Exception:
+        logger.exception("Auto-index failed for %s", cwd)
+        return json.dumps({
+            "error": "No projects indexed yet. Run index_codebase(path) first."
+        })
+
+
 # Default compact threshold: 256k tokens
 _COMPACT_THRESHOLD = 256_000
 
@@ -401,15 +440,17 @@ def project_summary(project: str | None = None) -> str:
     Returns:
         JSON summary of the project(s).
     """
-    storage = _get_storage()
     indexer = _get_indexer()
 
-    if not storage.list_projects():
-        return json.dumps({
-            "error": "No projects indexed yet. Run index_codebase(path) first."
-        })
+    err = _ensure_indexed()
+    if err:
+        return err
 
     project_id = _resolve_project_id(project)
+    err = _check_project_id(project_id, project) if project else None
+    if err:
+        return err
+
     summary = indexer.generate_project_summary(project_id=project_id)
     return json.dumps(summary, indent=2)
 
@@ -427,13 +468,13 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
     Returns:
         JSON array of matching code chunks with file path, project, and content.
     """
-    limit = max(1, min(limit, 100))  # Clamp to [1, 100]
+    if limit <= 0:
+        return json.dumps({"error": "limit must be a positive integer"})
+    limit = min(limit, 100)  # Cap at 100
 
-    storage = _get_storage()
-    if not storage.list_projects():
-        return json.dumps({
-            "error": "No projects indexed yet. Run index_codebase(path) first."
-        })
+    err = _ensure_indexed()
+    if err:
+        return err
 
     project_id = _resolve_project_id(project)
     err = _check_project_id(project_id, project) if project else None
@@ -481,10 +522,9 @@ def get_context(
         JSON with the most relevant code chunks within the token budget.
     """
     storage = _get_storage()
-    if not storage.list_projects():
-        return json.dumps({
-            "error": "No projects indexed yet. Run index_codebase(path) first."
-        })
+    err = _ensure_indexed()
+    if err:
+        return err
 
     project_id = _resolve_project_id(project)
     err = _check_project_id(project_id, project) if project else None
@@ -576,14 +616,19 @@ def search_structure(
     Returns:
         JSON array of matching symbol definitions.
     """
+    _VALID_KINDS = {"function", "class", "method", "any"}
     storage = _get_storage()
     if not symbol or not symbol.strip():
         return json.dumps({"error": "symbol is required"})
 
-    if not storage.list_projects():
+    if kind not in _VALID_KINDS:
         return json.dumps({
-            "error": "No projects indexed yet. Run index_codebase(path) first."
+            "error": f"Invalid kind: {kind!r}. Must be one of: {', '.join(sorted(_VALID_KINDS))}",
         })
+
+    err = _ensure_indexed()
+    if err:
+        return err
 
     project_id = _resolve_project_id(project)
     symbols = storage.search_symbols(
@@ -629,7 +674,9 @@ def trace_dependencies(
         return json.dumps({"error": f"File not indexed: {file}"})
 
     effective_pid = file_rec.project_id
-    depth = max(1, min(depth, 5))  # Clamp to [1, 5]
+    if depth < 1:
+        return json.dumps({"error": "depth must be >= 1"})
+    depth = min(depth, 5)  # Cap at 5
 
     def _get_imports_for(fid):
         rows = storage.conn.execute(
@@ -1063,6 +1110,13 @@ def get_diff_context(
                                 "content": chunk.content_text or "",
                             })
 
+    if line_start < 0 or line_end < 0:
+        return json.dumps({"error": "line_start and line_end must be >= 0"})
+    if line_start and line_end and line_start > line_end:
+        return json.dumps({
+            "error": f"line_start ({line_start}) must be <= line_end ({line_end})"
+        })
+
     if line_start and line_end:
         for chunk in chunks:
             if (chunk.start_line <= line_end and
@@ -1248,6 +1302,10 @@ def resolve_symbol(
         JSON with all matching definitions across repos, with code.
     """
     storage = _get_storage()
+
+    if not symbol or not symbol.strip():
+        return json.dumps({"error": "symbol is required"})
+
     source_pid = _resolve_project_id(project)
 
     # Search across all repos (exact match first)
@@ -1722,6 +1780,8 @@ def tool_analytics(hours: int = 24) -> str:
     Returns:
         JSON with per-tool stats and totals.
     """
+    if hours < 1:
+        return json.dumps({"error": "hours must be >= 1"})
     storage = _get_storage()
     since = time.time() - (hours * 3600)
     stats = storage.get_tool_analytics(since=since)
@@ -1887,10 +1947,15 @@ def store_memory(
     Returns:
         JSON confirmation with memory ID.
     """
+    _VALID_CATEGORIES = {"architecture", "convention", "decision", "note", "general"}
     if not key or not key.strip():
         return json.dumps({"error": "key is required"})
     if not content or not content.strip():
         return json.dumps({"error": "content is required"})
+    if category not in _VALID_CATEGORIES:
+        return json.dumps({
+            "error": f"Invalid category: {category!r}. Must be one of: {', '.join(sorted(_VALID_CATEGORIES))}",
+        })
     storage = _get_storage()
     project_id = _resolve_project_id(project)
     mem_id = storage.store_memory(

@@ -148,18 +148,24 @@ class TestServerTools:
         result = json.loads(remove_project("nonexistent/repo"))
         assert "error" in result
 
-    def test_tools_before_indexing(self):
-        """Tools should return error when no project is indexed."""
+    def test_tools_auto_index_when_no_projects(self):
+        """Tools should auto-index cwd when no project is indexed."""
         db_path = tempfile.mktemp(suffix=".db")
         os.environ["ARROW_DB_PATH"] = db_path
         os.environ["ARROW_VECTOR_PATH"] = tempfile.mktemp(suffix=".usearch")
 
         try:
             from arrow.server import project_summary, search_code, get_context
-            for tool_fn in [project_summary, lambda: search_code("test"),
-                            lambda: get_context("test")]:
-                result = json.loads(tool_fn())
-                assert "error" in result
+            # Should auto-index cwd instead of returning error
+            result = json.loads(project_summary())
+            assert "error" not in result
+            assert result.get("total_files", 0) > 0
+
+            result = json.loads(search_code("test"))
+            assert isinstance(result, list)
+
+            result = json.loads(get_context("test"))
+            assert "error" not in result
         finally:
             os.environ.pop("ARROW_DB_PATH", None)
             os.environ.pop("ARROW_VECTOR_PATH", None)
