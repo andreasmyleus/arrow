@@ -228,10 +228,6 @@ def _ensure_indexed() -> str | None:
         })
 
 
-# Default compact threshold: 256k tokens
-_COMPACT_THRESHOLD = 256_000
-
-
 def _record_chunk_sent(
     storage, chunk_info: dict, project_id: int | None,
 ) -> None:
