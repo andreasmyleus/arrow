@@ -753,6 +753,9 @@ def file_summary(path: str, project: str | None = None) -> str:
     Returns:
         JSON summary with functions, classes, imports, and token counts.
     """
+    if not path or not path.strip():
+        return json.dumps({"error": "path is required"})
+
     storage = _get_storage()
     project_id = _resolve_project_id(project)
     file_rec = storage.get_file(path, project_id=project_id)
@@ -817,6 +820,15 @@ def index_github_content(
     Returns:
         JSON status with file/chunk counts and timing.
     """
+    if not owner or not owner.strip():
+        return json.dumps({"error": "owner is required"})
+    if not repo or not repo.strip():
+        return json.dumps({"error": "repo is required"})
+    if not branch or not branch.strip():
+        return json.dumps({"error": "branch is required"})
+    if not files:
+        return json.dumps({"error": "files list is required and must not be empty"})
+
     indexer = _get_indexer()
     result = indexer.index_remote_files(owner, repo, branch, files)
     return json.dumps(result, indent=2)
@@ -1037,6 +1049,9 @@ def index_pr(path: str, pr_number: int) -> str:
         Use the project names with search_code() or get_context() to search
         either side of the PR.
     """
+    if pr_number < 1:
+        return json.dumps({"error": "pr_number must be a positive integer"})
+
     root = Path(path).resolve()
     if not root.is_dir():
         return json.dumps({"error": f"Not a directory: {path}"})
@@ -1389,6 +1404,9 @@ def get_tests_for(
     Returns:
         JSON with matching test functions and their code.
     """
+    if not function or not function.strip():
+        return json.dumps({"error": "function name is required"})
+
     storage = _get_storage()
     project_id = _resolve_project_id(project)
 
@@ -1584,6 +1602,9 @@ def export_index(project: str) -> str:
     Returns:
         JSON bundle with all index data for the project.
     """
+    if not project or not project.strip():
+        return json.dumps({"error": "project name is required"})
+
     storage = _get_storage()
     proj = storage.get_project_by_name(project)
     if not proj:
@@ -1991,6 +2012,9 @@ def recall_memory(
     Returns:
         JSON array of matching memories.
     """
+    if limit < 1:
+        return json.dumps({"error": "limit must be >= 1"})
+
     storage = _get_storage()
     project_id = _resolve_project_id(project)
     try:
@@ -2077,6 +2101,9 @@ def remove_project(project: str) -> str:
     Returns:
         JSON confirmation.
     """
+    if not project or not project.strip():
+        return json.dumps({"error": "project name is required"})
+
     storage = _get_storage()
     proj = storage.get_project_by_name(project)
     if not proj:
