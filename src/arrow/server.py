@@ -123,8 +123,13 @@ def _start_watcher(project_id: int, root: str) -> None:
             from .storage import Storage as _S
 
             db_path = os.environ.get("ARROW_DB_PATH", str(DEFAULT_DB_PATH))
+            vec_path = os.environ.get("ARROW_VECTOR_PATH", str(DEFAULT_VECTOR_PATH))
             thread_storage = _S(db_path)
-            thread_indexer = Indexer(thread_storage)
+            thread_vs = VectorStore(vec_path)
+            thread_emb = get_embedder()
+            thread_indexer = Indexer(
+                thread_storage, vector_store=thread_vs, embedder=thread_emb,
+            )
             thread_indexer.index_codebase(root)
             thread_storage.close()
             logger.info("Background re-index complete for %s", root)
@@ -370,6 +375,8 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
     Returns:
         JSON array of matching code chunks with file path, project, and content.
     """
+    if not query or not query.strip():
+        return json.dumps({"error": "query is required"})
     if limit <= 0:
         return json.dumps({"error": "limit must be a positive integer"})
     limit = min(limit, 100)  # Cap at 100
@@ -423,6 +430,8 @@ def get_context(
     Returns:
         JSON with the most relevant code chunks within the token budget.
     """
+    if not query or not query.strip():
+        return json.dumps({"error": "query is required"})
     if token_budget < 0:
         return json.dumps({"error": "token_budget must be >= 0 (0 = auto)"})
     storage = _get_storage()
@@ -1235,6 +1244,9 @@ def resolve_symbol(
         return json.dumps({"error": "symbol is required"})
 
     source_pid = _resolve_project_id(project)
+    # If project was given but not found, treat as no-project filter
+    if source_pid == _PROJECT_NOT_FOUND:
+        source_pid = None
 
     # Search across all repos (exact match first)
     results = storage.resolve_symbol_across_repos(
@@ -1722,6 +1734,7 @@ def tool_analytics(hours: int = 24) -> str:
     """
     if hours < 1:
         return json.dumps({"error": "hours must be >= 1"})
+    hours = min(hours, 8760)  # Cap at 1 year
     storage = _get_storage()
     since = time.time() - (hours * 3600)
     stats = storage.get_tool_analytics(since=since)
@@ -1834,6 +1847,8 @@ def recall_memory(
     Returns:
         JSON array of matching memories.
     """
+    if not query or not query.strip():
+        return json.dumps({"error": "query is required"})
     if limit < 1:
         return json.dumps({"error": "limit must be >= 1"})
 
@@ -1973,9 +1988,12 @@ def _auto_warm_cwd() -> None:
     existing = storage.get_project_by_root(str(cwd))
 
     # If already indexed recently (within last 5 min), skip
-    if existing and existing.last_indexed:
-        if time.time() - existing.last_indexed < 300:
-            return
+    if existing and existing.last_indexed is not None:
+        try:
+            if time.time() - existing.last_indexed < 300:
+                return
+        except TypeError:
+            pass  # last_indexed not a valid number
 
     def _warm():
         try:
