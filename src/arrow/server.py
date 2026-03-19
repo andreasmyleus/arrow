@@ -940,18 +940,27 @@ def index_github_repo(
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if clone_dir.is_dir():
-        # Update existing clone
+        # Update existing clone — handle both branches and tags
         try:
+            # Fetch the ref (works for branches; tags need --tags)
             subprocess.run(
                 ["git", "-C", str(clone_dir), "fetch", "origin", branch,
-                 "--depth=1"],
+                 "--depth=1", "--tags"],
                 capture_output=True, text=True, timeout=60,
             )
-            subprocess.run(
+            # Try origin/<branch> first (branch), then <branch> directly (tag)
+            checkout_result = subprocess.run(
                 ["git", "-C", str(clone_dir), "checkout",
                  f"origin/{branch}", "--force"],
                 capture_output=True, text=True, timeout=30,
             )
+            if checkout_result.returncode != 0:
+                # Likely a tag — checkout by name directly
+                subprocess.run(
+                    ["git", "-C", str(clone_dir), "checkout",
+                     branch, "--force"],
+                    capture_output=True, text=True, timeout=30,
+                )
         except Exception:
             # If update fails, remove and re-clone
             shutil.rmtree(clone_dir, ignore_errors=True)
