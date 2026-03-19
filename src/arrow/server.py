@@ -250,102 +250,6 @@ def _record_chunk_sent(
             return
 
 
-def _compact_context_response(
-    storage, query: str, project_id: int | None,
-    session_tokens: int, compact_threshold: int,
-) -> str:
-    """Generate a compacted summary of session context.
-
-    Instead of full source code, returns file paths + function
-    signatures + key structure. This fits far more context into
-    the same token budget.
-    """
-    details = storage.get_session_chunks_detail(_session_id)
-    if not details:
-        return json.dumps({
-            "query": query,
-            "compacted": True,
-            "reason": "session_token_limit",
-            "session_tokens": session_tokens,
-            "compact_threshold": compact_threshold,
-            "chunks": [],
-        })
-
-    # Group by file for compact presentation
-    file_chunks: dict[int, list[dict]] = {}
-    for det in details:
-        fid = det["file_id"]
-        if fid not in file_chunks:
-            file_chunks[fid] = []
-        file_chunks[fid].append(det)
-
-    # Build compact summaries: signature + first/last lines
-    compact_items = []
-    compact_tokens = 0
-    for fid, chunks in file_chunks.items():
-        file_rec = storage.get_file_by_id(fid)
-        if not file_rec:
-            continue
-        for ch in chunks:
-            content = ch.get("content_text", "") or ""
-            # Extract signature (first meaningful line)
-            lines = content.strip().split("\n")
-            sig_lines = []
-            for line in lines[:5]:
-                sig_lines.append(line)
-                if line.rstrip().endswith((
-                    ":", "{", "->", "/**", "*/",
-                )):
-                    break
-            signature = "\n".join(sig_lines)
-            # Estimate: signature ~10% of full tokens
-            est_tokens = max(
-                int(ch.get("tokens_sent", 0) * 0.1), 5
-            )
-            compact_items.append({
-                "file": file_rec.path,
-                "name": ch["name"],
-                "kind": ch["kind"],
-                "lines": f"{ch['start_line']}-{ch['end_line']}",
-                "signature": signature,
-                "original_tokens": ch.get("tokens_sent", 0),
-                "compact_tokens": est_tokens,
-            })
-            compact_tokens += est_tokens
-
-    # Now also run a fresh search for the new query
-    searcher = _get_searcher()
-    sent = storage.get_sent_chunk_ids(_session_id)
-    fresh = searcher.get_context(
-        query, token_budget=4000, project_id=project_id,
-        exclude_chunk_ids=sent, frecency_boost=True,
-    )
-
-    return json.dumps({
-        "query": query,
-        "compacted": True,
-        "reason": "session_token_limit",
-        "session_tokens": session_tokens,
-        "compact_threshold": compact_threshold,
-        "context_pressure_pct": round(
-            session_tokens / compact_threshold * 100, 1
-        ),
-        "previous_context_summary": {
-            "files_referenced": len(file_chunks),
-            "chunks_summarized": len(compact_items),
-            "original_tokens": session_tokens,
-            "compact_tokens": compact_tokens,
-            "items": compact_items,
-        },
-        "fresh_results": fresh,
-        "hint": (
-            "Context pressure is high. Previous results are "
-            "summarized above (signatures only). Use "
-            "compact_context() to reset or review full history."
-        ),
-    }, indent=2)
-
-
 # ─── MCP Tools ──────────────────────────────────────────────────────────
 
 
@@ -544,17 +448,6 @@ def get_context(
     sent = storage.get_sent_chunk_ids(_session_id)
     session_tokens = storage.get_session_token_total(_session_id)
 
-    # Auto-compact if session exceeds threshold
-    compact_threshold = int(os.environ.get(
-        "ARROW_COMPACT_THRESHOLD", str(_COMPACT_THRESHOLD)
-    )) or _COMPACT_THRESHOLD
-    if session_tokens > compact_threshold:
-        # Return compacted summary instead of full code
-        return _compact_context_response(
-            storage, query, project_id, session_tokens,
-            compact_threshold,
-        )
-
     t0 = time.time()
     context = searcher.get_context(
         query, token_budget=token_budget, project_id=project_id,
@@ -581,9 +474,6 @@ def get_context(
     context["budget_mode"] = "auto" if auto else "manual"
     context["session_chunks_excluded"] = len(sent)
     context["session_tokens_total"] = session_tokens
-    context["compact_threshold"] = compact_threshold
-    pct = round(session_tokens / compact_threshold * 100, 1)
-    context["context_pressure_pct"] = pct
 
     # Add search hints when no results found to help the agent pivot
     if not context.get("chunks"):
