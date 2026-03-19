@@ -250,7 +250,7 @@ Chunk kinds: function(203), class(14), module(2)
 | Tool | Description |
 |------|-------------|
 | `context_pressure()` | Session token usage, pressure %, status |
-| `compact_context(reset?)` | Compact sent context to signatures |
+| `search_regex(pattern, limit?, project?)` | Regex search against indexed code |
 | `store_memory(key, content, category?, project?)` | Persist knowledge across sessions |
 | `recall_memory(query, category?, project?, limit?)` | FTS search of stored memories |
 | `list_memories(category?, project?)` | List all memories |

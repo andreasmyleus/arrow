@@ -30,7 +30,6 @@ from arrow.server import (
     project_summary,
     remove_project,
     context_pressure,
-    compact_context,
 )
 
 
