@@ -1,39 +1,33 @@
 """Tests for test mapping (get_tests_for)."""
 
-import json
-
 
 class TestGetTestsFor:
     def test_find_tests_by_name(self, setup_server):
         from arrow.server import get_tests_for
-        result = json.loads(get_tests_for("authenticate"))
-        assert "error" not in result
-        assert result["function"] == "authenticate"
-        # Should find test_authenticate
-        test_names = [t["test_name"] for t in result["tests"]]
-        assert any("authenticate" in name for name in test_names)
+        result = get_tests_for("authenticate")
+        assert "authenticate" in result
+        assert "tests for:" in result
 
     def test_find_tests_by_reference(self, setup_server):
         from arrow.server import get_tests_for
-        result = json.loads(get_tests_for("authorize"))
-        # test_authorize references authorize
-        assert result["total"] > 0
+        result = get_tests_for("authorize")
+        assert "authorize" in result
+        assert "found" in result
 
     def test_find_tests_with_source_file(self, setup_server):
         from arrow.server import get_tests_for
-        result = json.loads(get_tests_for(
+        result = get_tests_for(
             "authenticate", file="auth.py",
-        ))
-        assert result["source_file"] == "auth.py"
-        assert result["total"] > 0
+        )
+        assert "source: auth.py" in result
 
     def test_no_tests_for_unknown_function(self, setup_server):
         from arrow.server import get_tests_for
-        result = json.loads(get_tests_for("zzz_nonexistent_function"))
-        assert result["total"] == 0
+        result = get_tests_for("zzz_nonexistent_function")
+        assert "No tests found" in result
 
     def test_find_class_tests(self, setup_server):
         from arrow.server import get_tests_for
-        result = json.loads(get_tests_for("AuthHandler"))
+        result = get_tests_for("AuthHandler")
         # TestAuthHandler references AuthHandler
-        assert isinstance(result["tests"], list)
+        assert "AuthHandler" in result

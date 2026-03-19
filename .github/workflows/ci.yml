@@ -40,7 +40,7 @@ jobs:
 
       - name: Test Docker image
         run: |
-          docker run --rm arrow-mcp:test python -c "
+          docker run --rm --entrypoint python arrow-mcp:test -c "
           from arrow.storage import Storage
           from arrow.indexer import Indexer
           import tempfile

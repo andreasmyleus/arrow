@@ -255,6 +255,34 @@ def _record_chunk_sent(
             return
 
 
+# ─── Formatting helpers ─────────────────────────────────────────────────
+
+
+def _fmt_chunk(chunk: dict, show_score: bool = False) -> str:
+    """Format a code chunk as a readable text block."""
+    header_parts = [f"# {chunk.get('file', '?')}"]
+    name = chunk.get("name") or chunk.get("test_name", "")
+    kind = chunk.get("kind", "")
+    lines = chunk.get("lines", "")
+    if name:
+        header_parts.append(f"  {kind} {name}" if kind else f"  {name}")
+    if lines:
+        header_parts[0] += f":{lines}"
+    if show_score and "score" in chunk:
+        header_parts.append(f"  score={chunk['score']}")
+    header = "".join(header_parts)
+
+    content = chunk.get("content", "")
+    if not content:
+        return header
+    return f"{header}\n{content}"
+
+
+def _fmt_chunks(chunks: list[dict], **kwargs) -> str:
+    """Format a list of code chunks separated by blank lines."""
+    return "\n\n".join(_fmt_chunk(c, **kwargs) for c in chunks)
+
+
 # ─── MCP Tools ──────────────────────────────────────────────────────────
 
 
@@ -393,9 +421,9 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
     searcher = _get_searcher()
     results = searcher.search(query, limit=limit, project_id=project_id)
 
-    output = []
+    chunks = []
     for r in results:
-        output.append({
+        chunks.append({
             "file": r.file_path,
             "project": r.project_name,
             "name": r.chunk.name if r.chunk else "",
@@ -408,7 +436,9 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
             "tokens": r.chunk.token_count if r.chunk else 0,
         })
 
-    return json.dumps(output, indent=2)
+    return f"Found {len(chunks)} results\n\n" + _fmt_chunks(
+        chunks, show_score=True
+    )
 
 
 @mcp.tool()
@@ -487,18 +517,25 @@ def get_context(
     # Add search hints when no results found to help the agent pivot
     if not context.get("chunks"):
         stats = storage.get_stats(project_id=project_id)
-        context["suggestions"] = [
-            "Try broader or alternative keywords",
-            "Use search_structure() to find by function/class name",
-            "Use file_summary() if you know the file path",
-        ]
-        context["indexed_stats"] = {
-            "files": stats["files"],
-            "chunks": stats["chunks"],
-            "languages": list(stats["languages"].keys()),
-        }
+        return (
+            f"No results for: {query}\n\n"
+            f"Indexed: {stats['files']} files, {stats['chunks']} chunks\n"
+            "Suggestions:\n"
+            "- Try broader or alternative keywords\n"
+            "- Use search_structure() to find by function/class name\n"
+            "- Use file_summary() if you know the file path"
+        )
 
-    return json.dumps(context, indent=2)
+    meta = (
+        f"query: {query}\n"
+        f"budget: {context['token_budget']}t ({context['budget_mode']}) "
+        f"| used: {context['tokens_used']}t "
+        f"| {context['chunks_returned']}/{context['chunks_searched']} chunks"
+    )
+    if context.get("session_chunks_excluded"):
+        meta += f" | {context['session_chunks_excluded']} excluded (already sent)"
+
+    return meta + "\n\n" + _fmt_chunks(context["chunks"])
 
 
 @mcp.tool()
@@ -1093,17 +1130,22 @@ def get_diff_context(
         file, project_id=file_rec.project_id
     )
 
-    return json.dumps({
-        "file": file,
-        "changed_functions": changed_functions,
-        "callers": callers[:30],
-        "dependent_files": [
-            {"path": imp["path"], "language": imp.get("language")}
-            for imp in importers
-        ],
-        "total_callers": len(callers),
-        "total_dependents": len(importers),
-    }, indent=2)
+    parts = [f"# {file} — diff context"]
+    if changed_functions:
+        parts.append(f"\n## Changed functions ({len(changed_functions)})")
+        parts.append(_fmt_chunks(changed_functions))
+    if callers:
+        parts.append(f"\n## Callers ({len(callers)} total, showing {min(len(callers), 30)})")
+        for caller in callers[:30]:
+            parts.append(
+                f"- {caller['file']}:{caller['lines']}  {caller['kind']}"
+                f" {caller['name']}  (calls {caller['calls']})"
+            )
+    if importers:
+        parts.append(f"\n## Dependent files ({len(importers)})")
+        for imp in importers:
+            parts.append(f"- {imp['path']}  ({imp.get('language', '?')})")
+    return "\n".join(parts)
 
 
 @mcp.tool()
@@ -1302,12 +1344,22 @@ def resolve_symbol(
                 "cross_repo": result["project_id"] != source_pid if source_pid else False,
             })
 
-    return json.dumps({
-        "query": symbol,
-        "source_project": project,
-        "results": output[:20],
-        "total": len(output),
-    }, indent=2)
+    if not output:
+        return f"No definitions found for '{symbol}'"
+    parts = [f"resolve: {symbol}  ({len(output)} result{'s' if len(output) != 1 else ''})"]
+    for item in output[:20]:
+        tag = " [cross-repo]" if item.get("cross_repo") else ""
+        header = f"\n# {item['file']}:{item['lines']}  {item['kind']} {item['symbol']}{tag}"
+        if item.get("project"):
+            header += f"  ({item['project']})"
+        parts.append(header)
+        content = item.get("content", "")
+        if content:
+            if item.get("truncated"):
+                parts.append(content + "\n... (truncated)")
+            else:
+                parts.append(content)
+    return "\n".join(parts)
 
 
 @mcp.tool()
@@ -1416,12 +1468,15 @@ def get_tests_for(
 
     all_tests = matching_tests + import_tests
 
-    return json.dumps({
-        "function": function,
-        "source_file": file,
-        "tests": all_tests[:30],
-        "total": len(all_tests),
-    }, indent=2)
+    if not all_tests:
+        msg = f"No tests found for '{function}'"
+        if file:
+            msg += f" in {file}"
+        return msg
+    header = f"tests for: {function}  ({len(all_tests)} found)"
+    if file:
+        header += f"  source: {file}"
+    return header + "\n\n" + _fmt_chunks(all_tests[:30])
 
 
 @mcp.tool()
