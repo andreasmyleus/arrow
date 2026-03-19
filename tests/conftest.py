@@ -6,6 +6,15 @@ import tempfile
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _git_identity(monkeypatch):
+    """Ensure git has committer/author identity for tests that create repos."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.com")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.com")
+
+
 @pytest.fixture
 def project_dir(tmp_path):
     """Create a sample project with cross-references for testing."""
