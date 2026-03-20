@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 # Non-code languages get a score penalty so they don't dominate search results
 _NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
 
+# Query terms that signal the user wants config/non-code files
+_CONFIG_QUERY_TERMS = {
+    "toml", "yaml", "yml", "json", "dockerfile", "docker",
+    "config", "configuration", "pyproject", "package",
+    "readme", "markdown", "md", "cargo", "makefile",
+    "healthcheck", "compose", "requirements", "setup",
+    "dependencies", "devcontainer",
+}
+
 _TEST_PATH_MARKERS = ("test_", "_test.", "tests/", "__tests__/", "spec/", "/test/")
 
 
@@ -203,8 +212,12 @@ class HybridSearcher:
 
             # Build query terms for path boosting
             query_terms = [t.lower() for t in query.split() if len(t) >= 3]
+            query_terms_all = [t.lower() for t in query.split()]
             query_mentions_test = any(
                 t in ("test", "tests", "testing", "spec") for t in query_terms
+            )
+            query_mentions_config = any(
+                t in _CONFIG_QUERY_TERMS for t in query_terms_all
             )
 
             penalized = []
@@ -214,9 +227,10 @@ class HybridSearcher:
                 if frec:
                     path_lower = frec.path.lower()
 
-                    # Non-code penalty (existing)
+                    # Non-code penalty — skip when query is about config files
                     if frec.language in _NON_CODE_LANGS:
-                        score = score * get_config().search.non_code_penalty
+                        if not query_mentions_config:
+                            score = score * get_config().search.non_code_penalty
 
                     # Path boost: if query terms appear in the file path
                     if query_terms and any(t in path_lower for t in query_terms):
