@@ -65,7 +65,8 @@ def _is_doc_query(query_lower: str) -> bool:
 
 def _is_doc_path(path_lower: str) -> bool:
     """Check if a file path looks like documentation."""
-    return any(m in path_lower for m in _DOC_PATH_MARKERS)
+    p = path_lower.lower()
+    return any(m in p for m in _DOC_PATH_MARKERS)
 
 
 # --- Precision filtering constants ---

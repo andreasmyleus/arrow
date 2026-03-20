@@ -295,9 +295,12 @@ class TestSearchRegexMultiline:
             result = _search_regex_on_disk(compiled, Path(tmpdir).resolve(), 50, 1, multiline=False)
             assert "0 matches" in result
 
-    def test_multiline_integration(self, indexed_regex_project):
+    def test_multiline_integration(self, indexed_regex_project, monkeypatch):
         """Multiline search via the top-level tool should find cross-line patterns."""
         from arrow.server import search_regex
+
+        project_root = indexed_regex_project[0]
+        monkeypatch.chdir(project_root)
 
         # errors.py has "except KeyError:\n        logger.error(...)"
         result = search_regex(r"except KeyError.*?logger", multiline=True)
