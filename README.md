@@ -2,9 +2,9 @@
 
 # Arrow
 
-**A local MCP server that gives Claude Code a brain for your codebase.**
+**A local MCP server that indexes your codebase into semantic chunks and serves exactly the code your AI agent needs.**
 
-*The same intelligent code retrieval that powers Cursor IDE — but open source, local, and built for Claude Code.*
+*Cursor-style intelligent code retrieval — open source, local, and works with any MCP-compatible agent.*
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -21,7 +21,7 @@
 
 ## The Problem
 
-Claude Code reads entire files with Glob + Grep + Read. On a moderately sized codebase, a single question can consume **1M+ tokens** and take **13+ seconds** just to gather context.
+AI coding agents read entire files to gather context. On a moderately sized codebase, a single question can consume **1M+ tokens** and take **13+ seconds**.
 
 **Arrow fixes this.** It pre-indexes your code into semantic chunks (functions, classes, methods), then serves exactly the relevant pieces in **1-4ms** using **96% fewer tokens**.
 
@@ -41,11 +41,14 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
 
-### 2. Register with Claude Code
+### 2. Register with your agent
 
+**Claude Code:**
 ```bash
 claude mcp add --transport stdio arrow -- /path/to/arrow/.venv/bin/python -m arrow serve
 ```
+
+**Other MCP agents:** Point your agent's MCP config at the same command, or use HTTP transport (see [Docker](#docker)).
 
 ### 3. Index your project
 
@@ -53,91 +56,59 @@ claude mcp add --transport stdio arrow -- /path/to/arrow/.venv/bin/python -m arr
 arrow index /path/to/project
 ```
 
-Or just ask Claude: *"Index my codebase at /path/to/project"*
+Or just ask your agent: *"Index my codebase at /path/to/project"*
 
-### 4. Add to your CLAUDE.md (recommended)
+### 4. Add to your agent instructions (recommended)
+
+Add something like this to your `CLAUDE.md`, system prompt, or agent config:
 
 ```markdown
 ## Code Context
 
 This project has an MCP server `arrow` for fast code search.
-
 Use these MCP tools BEFORE reading files manually:
-- `get_context(query)` — get relevant code (auto-budgets, conversation-aware, auto-compacts)
-- `search_code(query)` — search the codebase with frecency boost
-- `search_structure(symbol)` — find definitions
-- `get_diff_context(file)` — see changed code + all callers/dependents
-- `what_breaks_if_i_change(file, function)` — impact analysis before changes
+- `get_context(query)` — get relevant code (auto-budgets, conversation-aware)
+- `search_code(query)` — hybrid search with frecency boost
+- `search_structure(symbol)` — find definitions by name
+- `what_breaks_if_i_change(file, function)` — impact analysis
 - `get_tests_for(function)` — find tests for a function
-- `resolve_symbol(symbol)` — find definitions across all indexed repos
-- `find_dead_code()` — find unreferenced functions
-- `store_memory(key, content)` / `recall_memory(query)` — persist knowledge across sessions
-- `context_pressure()` — check context window usage
-- `list_projects()` — see all indexed repos
-- `index_github_repo(owner, repo)` — clone + index a remote GitHub repo (uses `gh` CLI)
+- `index_github_repo(owner, repo)` — clone + index a remote repo
 ```
 
-Add a remote repos section to your CLAUDE.md if you work across GitHub repos:
-
-```markdown
-## Remote Repos
-
-When you need code from a GitHub repo:
-1. Always check the index first — use `search_code(query, project="owner/repo")`
-2. If not indexed, use `index_github_repo(owner, repo)` to clone and index in one step
-3. Never manually fetch + pass files — `index_github_repo` handles cloning, caching, and incremental updates
-```
-
-That's it. Claude will now use Arrow automatically for all code lookups.
+That's it. Your agent will now use Arrow automatically for code lookups.
 
 ---
 
 ## Features
 
-### Core Intelligence
-
-| Feature | Description |
-|---------|-------------|
-| **AST-based chunking** | tree-sitter parses code into semantic units (functions, classes) across 64+ languages |
-| **Hybrid search** | BM25 full-text (FTS5) + semantic vector search (usearch + ONNX embeddings) |
-| **Smart token budgeting** | Auto-estimates optimal budget from query complexity (500 tok for lookups, 8000+ for architecture) |
-| **Frecency-weighted results** | Recently/frequently accessed files are boosted in search rankings |
-| **Incremental indexing** | xxHash3 content-hashing ensures only changed files are re-indexed |
-| **Auto-warm on startup** | Background-indexes the working directory so the first query is instant |
+### Search & Retrieval
+- **AST-based chunking** — tree-sitter parses 64+ languages into semantic units (functions, classes, methods)
+- **Hybrid search** — BM25 full-text + semantic vector search with reciprocal rank fusion
+- **Smart token budgeting** — auto-estimates optimal budget from query complexity
+- **Frecency boost** — recently/frequently accessed files rank higher
+- **Regex search** — exact pattern matching against indexed chunks
 
 ### Code Analysis
-
-| Feature | Description |
-|---------|-------------|
-| **Semantic diff context** | Changed code + all callers and dependents of modified functions |
-| **Change impact analysis** | Traces reverse dependencies, affected tests, and risk level (low/medium/high) |
-| **Cross-repo symbol resolution** | Find definitions across all indexed repos when tracing imports |
-| **Test mapping** | Maps any function to its test files via import tracing + naming conventions |
-| **Dead code detection** | Finds functions/classes with zero callers across the full index |
-| **Stale index detection** | Detects drift between index and working tree |
+- **Impact analysis** — what breaks if you change a file/function (callers, tests, risk level)
+- **Semantic diff context** — changed code + all callers/dependents of modified functions
+- **Cross-repo symbol resolution** — find definitions across all indexed repos
+- **Test mapping** — maps functions to tests via import tracing + naming conventions
+- **Dead code detection** — finds functions with zero callers
 
 ### Multi-Repo & Git
+- **Multi-repo database** — all repos in one shared SQLite DB, organized by `org/repo`
+- **Git-aware** — tracks branch + HEAD, auto-updates on commits
+- **History snapshots** — index at any commit, tag, or branch
+- **PR review** — index both sides of a PR for comparison
+- **GitHub cloning** — one-command clone + index via `gh` CLI
+- **Watchdog re-indexing** — monitors file changes, re-indexes in background
 
-| Feature | Description |
-|---------|-------------|
-| **Multi-repo support** | All repos in one shared database, organized by `org/repo` |
-| **Git-aware** | Tracks branch + HEAD commit per project, auto-updates on commits |
-| **Git history snapshots** | Index code at any commit, tag, or branch for historical search |
-| **PR review** | Index both sides of a PR (base + head) for comparison |
-| **GitHub repo cloning** | One-command clone + index of any GitHub repo via `gh` CLI |
-| **GitHub remote caching** | Cache content from GitHub MCP reads for cross-project search |
-| **Automatic re-indexing** | Watchdog monitors file changes per-project, re-indexes in background |
-
-### Session Management
-
-| Feature | Description |
-|---------|-------------|
-| **Conversation-aware context** | Tracks which chunks Claude has seen — never re-sends the same code |
-| **Context window compaction** | Auto-compacts at 256k tokens, returns signatures instead of full code |
-| **Long-term memory** | Persistent key-value memory with FTS search, survives across sessions |
-| **Index export/import** | Share indexes across machines or CI with JSON bundles |
-| **Tool analytics** | Tracks call counts, latency, and usage patterns per MCP tool |
-| **Concurrent-safe** | SQLite WAL + per-project write locks for multiple sessions/subagents |
+### Session & Memory
+- **Conversation-aware** — tracks which chunks have been sent, never re-sends duplicates
+- **Auto-compaction** — compacts to signatures at 256k tokens
+- **Long-term memory** — persistent key-value store with FTS, survives across sessions
+- **Index export/import** — share indexes across machines or CI
+- **Concurrent-safe** — SQLite WAL + per-project write locks
 
 ---
 
@@ -156,9 +127,9 @@ That's it. Claude will now use Arrow automatically for all code lookups.
 | get_context | 0.8-0.95ms | search + rank + token trim |
 | Budget fill rate | 82-99% | Fills budget efficiently |
 
-### Arrow vs Traditional (Grep + Read)
+### Arrow vs Traditional (Read Entire Files)
 
-110 queries across 10 complexity tiers. Arrow uses `get_context` with a 4000-token budget. Traditional simulates Glob + Grep + Read (entire file reads). Benchmarked on Arrow's own codebase (14 files, 219 chunks).
+110 queries across 10 complexity tiers. Arrow uses `get_context` with a 4000-token budget. Traditional simulates reading entire files. Benchmarked on Arrow's own codebase (14 files, 219 chunks).
 
 ```
 Token efficiency:  15.2x (Arrow uses 1/15th the tokens)
@@ -364,7 +335,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t arrow:latest .
 ### Architecture
 
 ```
-Claude Code ──(JSON-RPC/stdio)──> Arrow MCP Server
+AI Agent ──(JSON-RPC/stdio|HTTP)──> Arrow MCP Server
                                     |
                     +---------------+---------------+
                     |               |               |
@@ -396,7 +367,7 @@ Arrow tracks all repos in one shared database, organized by `org/repo` (auto-det
 | Embeddings | `onnxruntime` + Jina | CPU-only, no GPU needed |
 | Full-text search | SQLite FTS5 | BM25 scoring, zero deps |
 | Content hashing | `xxhash` (xxHash3-128) | 31 GB/s throughput |
-| Token counting | `tiktoken` | Exact counts for Claude |
+| Token counting | `tiktoken` | Exact token counts |
 | Compression | `zstandard` (zstd) | 3.4x faster than zlib |
 | File watching | `watchdog` | Native OS APIs |
 | Database | SQLite (WAL mode) | 800+ writes/sec |
@@ -412,7 +383,7 @@ pip install -e ".[test]"
 pytest tests/ -v
 ```
 
-197 tests across 20 test files covering indexing, search, storage, server tools, git utils, memory, compaction, analytics, and more.
+197 tests across 20 test files.
 
 ### Running Benchmarks
 
