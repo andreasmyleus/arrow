@@ -52,6 +52,24 @@ _DOC_QUERY_PHRASES = (
 _DOC_PATH_MARKERS = ("readme", "changelog", "contributing", "guide", "docs/")
 
 
+def _sanitize_fts_query(terms: list[str]) -> str:
+    """Build a safe FTS5 query from a list of terms.
+
+    Strips FTS5 special characters and returns space-separated terms.
+    The caller (storage.search_fts) joins with OR internally.
+    Returns empty string if no valid terms remain.
+    """
+    _fts_special = _re.compile(r'[*"():?<>{}\\^~!@#$%&+=|/]')
+    safe = []
+    for term in terms:
+        cleaned = _fts_special.sub("", term).strip()
+        if cleaned and len(cleaned) >= 2:
+            safe.append(cleaned)
+    if not safe:
+        return ""
+    return " ".join(safe)
+
+
 def _is_doc_query(query_lower: str) -> bool:
     """Check if a query is asking about documentation/overview information."""
     words = set(query_lower.split())
@@ -401,6 +419,76 @@ class HybridSearcher:
         proj = self.storage.get_project_by_name(project)
         return proj.id if proj else None
 
+    def _vector_search(
+        self, query: str, vec_limit: int, project_id: Optional[int],
+    ) -> list[tuple[int, float]]:
+        """Run vector search and return (chunk_id, similarity) pairs."""
+        if (
+            self.vector_store is None
+            or self.embedder is None
+            or not self.embedder.ready
+            or len(self.vector_store) == 0
+        ):
+            return []
+        try:
+            query_vec = self.embedder.embed_query(query)
+            fetch_limit = vec_limit * 3 if project_id else vec_limit
+            vec_results = self.vector_store.search(
+                query_vec, limit=fetch_limit
+            )
+            if vec_results and project_id is not None:
+                chunk_ids = [cid for cid, _ in vec_results]
+                chunks = self.storage.get_chunks_by_ids(chunk_ids)
+                valid_ids = {
+                    c.id for c in chunks if c.project_id == project_id
+                }
+                vec_results = [
+                    (cid, dist) for cid, dist in vec_results
+                    if cid in valid_ids
+                ][:vec_limit]
+            return [(cid, 1.0 - dist) for cid, dist in vec_results] if vec_results else []
+        except Exception:
+            logger.warning("Vector search failed")
+            return []
+
+    def _file_concept_candidates(
+        self, concepts: list[str], project_id: Optional[int], limit: int = 30,
+    ) -> list[tuple[int, float]]:
+        """Find chunks from files whose names match query concepts.
+
+        This is the "if you mention chunker, look at chunker.py" strategy.
+        Returns (chunk_id, score) pairs with synthetic scores for RRF fusion.
+        """
+        if not concepts:
+            return []
+        all_files = self.storage.get_all_files(project_id=project_id)
+        scored_files = []
+        for f in all_files:
+            boost = _filename_match_boost(f.path.lower(), concepts)
+            if boost > 1.0:
+                scored_files.append((f, boost))
+
+        if not scored_files:
+            return []
+
+        # Sort by boost descending, take top files
+        scored_files.sort(key=lambda x: x[1], reverse=True)
+        candidates = []
+        for f, boost in scored_files[:5]:
+            chunks = self.storage.get_chunks_for_file(f.id)
+            # Rank chunks within file by relevance to concepts
+            for i, chunk in enumerate(chunks):
+                # Give higher scores to chunks whose names match concepts
+                chunk_name_lower = (chunk.name or "").lower()
+                name_match = any(c in chunk_name_lower for c in concepts)
+                # Synthetic score: file boost * position decay * name bonus
+                score = boost * (1.0 / (i + 1)) * (1.5 if name_match else 1.0)
+                candidates.append((chunk.id, score))
+
+        # Sort by score and limit
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[:limit]
+
     def search(
         self,
         query: str,
@@ -412,10 +500,15 @@ class HybridSearcher:
         exclude_chunk_ids: Optional[set[int]] = None,
         dedup_strategy: str = "penalize",
     ) -> list[SearchResult]:
-        """Hybrid search combining BM25 and vector similarity.
+        """Multi-strategy hybrid search: concept BM25 + vector + file-name.
+
+        Three independent search strategies fused with RRF:
+        1. BM25 via FTS5 using extracted concept keywords (not raw query)
+        2. Vector similarity using the full natural-language query
+        3. File-name matching — chunks from files whose names match concepts
 
         Args:
-            query: Search query.
+            query: Search query (natural language or keywords).
             limit: Max results to return.
             fts_limit: Max FTS candidates.
             vec_limit: Max vector candidates.
@@ -426,51 +519,53 @@ class HybridSearcher:
                 "penalize" - demote already-sent chunks by 50% (default)
                 "exclude" - hard-exclude already-sent chunks (legacy)
         """
+        query_concepts = _extract_query_concepts(query)
         ranked_lists = []
 
-        # BM25 search via FTS5 (project-scoped if specified)
-        fts_results = self.storage.search_fts(
-            query, limit=fts_limit, project_id=project_id
-        )
-        # Build a set of chunk IDs that BM25 found (for exact-match bonus)
+        # --- Strategy 1a: BM25 with raw query ---
+        # Works well for keyword queries like "get_user_profile".
         bm25_hit_ids: set[int] = set()
-        if fts_results:
-            bm25_ranked = [(cid, -score) for cid, score in fts_results]
-            bm25_hit_ids = {cid for cid, _ in bm25_ranked}
-            ranked_lists.append(bm25_ranked)
+        raw_fts = _sanitize_fts_query(query.split())
+        if raw_fts:
+            raw_results = self.storage.search_fts(
+                raw_fts, limit=fts_limit, project_id=project_id
+            )
+            if raw_results:
+                bm25_ranked = [(cid, -score) for cid, score in raw_results]
+                bm25_hit_ids = {cid for cid, _ in bm25_ranked}
+                ranked_lists.append(bm25_ranked)
 
-        # Vector search (if available)
-        if (
-            self.vector_store is not None
-            and self.embedder is not None
-            and self.embedder.ready
-            and len(self.vector_store) > 0
-        ):
-            try:
-                query_vec = self.embedder.embed_query(query)
-                # Over-fetch for project filtering
-                fetch_limit = vec_limit * 3 if project_id else vec_limit
-                vec_results = self.vector_store.search(
-                    query_vec, limit=fetch_limit
-                )
-                if vec_results and project_id is not None:
-                    # Post-filter by project
-                    chunk_ids = [cid for cid, _ in vec_results]
-                    chunks = self.storage.get_chunks_by_ids(chunk_ids)
-                    valid_ids = {
-                        c.id for c in chunks if c.project_id == project_id
-                    }
-                    vec_results = [
-                        (cid, dist) for cid, dist in vec_results
-                        if cid in valid_ids
-                    ][:vec_limit]
-                if vec_results:
-                    vec_ranked = [
-                        (cid, 1.0 - dist) for cid, dist in vec_results
-                    ]
-                    ranked_lists.append(vec_ranked)
-            except Exception:
-                logger.warning("Vector search failed, using BM25 only")
+        # --- Strategy 1b: BM25 with extracted concepts ---
+        # Strips stop words and special chars — works for natural-language
+        # queries like "How does the chunker handle nested classes?"
+        concept_fts = _sanitize_fts_query(query_concepts)
+        if concept_fts and concept_fts != raw_fts:
+            concept_results = self.storage.search_fts(
+                concept_fts, limit=fts_limit, project_id=project_id
+            )
+            if concept_results:
+                concept_ranked = [
+                    (cid, -score) for cid, score in concept_results
+                ]
+                bm25_hit_ids |= {cid for cid, _ in concept_ranked}
+                ranked_lists.append(concept_ranked)
+
+        # --- Strategy 2: Vector search (semantic) ---
+        # Use the FULL natural-language query for embedding — semantic
+        # models handle natural language better than keyword extractions.
+        vec_ranked = self._vector_search(query, vec_limit, project_id)
+        if vec_ranked:
+            ranked_lists.append(vec_ranked)
+
+        # --- Strategy 3: File-name concept matching ---
+        # If query mentions "chunker", include chunks from chunker.py.
+        # This catches cases where BM25 and vector both miss because the
+        # relevant code doesn't contain the query keywords verbatim.
+        file_candidates = self._file_concept_candidates(
+            query_concepts, project_id
+        )
+        if file_candidates:
+            ranked_lists.append(file_candidates)
 
         if not ranked_lists:
             return []
@@ -481,21 +576,17 @@ class HybridSearcher:
         # Conversation-aware dedup for already-sent chunks
         if exclude_chunk_ids and dedup_strategy != "none":
             if dedup_strategy == "exclude":
-                # Legacy: hard-exclude already-sent chunks entirely
                 fused = [
                     (cid, s) for cid, s in fused
                     if cid not in exclude_chunk_ids
                 ]
             else:
-                # "penalize" (default): demote already-sent chunks by 50%
-                # so they still appear when highly relevant but rank lower
                 penalty = 0.5
                 fused = [
                     (cid, s * penalty) if cid in exclude_chunk_ids
                     else (cid, s)
                     for cid, s in fused
                 ]
-                # Re-sort after applying penalty
                 fused.sort(key=lambda x: x[1], reverse=True)
 
         # Apply frecency boost
@@ -504,19 +595,15 @@ class HybridSearcher:
                 project_id=project_id
             )
             if frecency:
-                # Pre-fetch chunk->file mapping for boost
                 boost_ids = [cid for cid, _ in fused[:limit * 2]]
                 boost_chunks = {
                     c.id: c.file_id
-                    for c in self.storage.get_chunks_by_ids(
-                        boost_ids
-                    )
+                    for c in self.storage.get_chunks_by_ids(boost_ids)
                 }
                 boosted = []
                 for cid, score in fused:
                     fid = boost_chunks.get(cid)
                     if fid and fid in frecency:
-                        # Boost: up to 30% increase
                         boost = min(frecency[fid] * 0.05, 0.3)
                         score = score * (1.0 + boost)
                     boosted.append((cid, score))
@@ -525,8 +612,6 @@ class HybridSearcher:
                 )
 
         # --- Scoring adjustments: file-name boost, BM25 bonus, penalties ---
-        query_concepts = _extract_query_concepts(query)
-
         adjust_ids = [cid for cid, _ in fused[:limit * 3]]
         if adjust_ids:
             adjust_chunks = {
@@ -555,51 +640,43 @@ class HybridSearcher:
                 if frec:
                     path_lower = frec.path.lower()
 
-                    # File-name match boost (uses concept extraction
-                    # instead of raw query terms for better matching).
-                    # Computed early so it can suppress non-code penalties.
                     name_boost = _filename_match_boost(
                         path_lower, query_concepts,
                     )
 
-                    # File-type scoring: boost or penalize based on query intent
                     if frec.language in _NON_CODE_LANGS:
                         if query_is_doc and _is_doc_path(path_lower):
                             score = score * 2.5
                         elif query_is_doc and frec.language == "markdown":
                             score = score * 1.3
                         elif query_mentions_config:
-                            pass  # Skip penalty when query targets config files
+                            pass
                         elif name_boost > 1.0:
-                            pass  # Skip penalty when filename/path matches query
+                            pass
                         else:
                             score = score * get_config().search.non_code_penalty
 
                     score = score * name_boost
 
-                    # Exact-match bonus: chunks found by BM25 (keyword match)
-                    # get a 20% boost — they contain the literal query terms
                     if cid in bm25_hit_ids:
                         score = score * 1.2
 
-                    # Test file penalty when query isn't about tests
                     if not query_mentions_test and _is_test_path(path_lower):
                         score = score * 0.7
 
                 adjusted.append((cid, score))
             fused = sorted(adjusted, key=lambda x: x[1], reverse=True)
 
-        # Precision filtering: drop low-relevance tail before materialising
+        # Precision filtering: drop low-relevance tail
         fused = filter_by_relevance(fused)
 
-        # Batch fetch chunks and files to avoid N+1 queries
+        # Materialise results
         top = fused[:limit]
         chunk_ids = [cid for cid, _ in top]
         chunks_map = {
             c.id: c for c in self.storage.get_chunks_by_ids(chunk_ids)
         }
 
-        # Batch fetch files
         file_ids = list({c.file_id for c in chunks_map.values()})
         files_map = {}
         for fid in file_ids:
@@ -607,7 +684,6 @@ class HybridSearcher:
             if rec:
                 files_map[fid] = rec
 
-        # Build project name lookup
         project_names: dict[int, str] = {}
         project_ids_seen = {
             c.project_id for c in chunks_map.values() if c.project_id
@@ -627,7 +703,6 @@ class HybridSearcher:
             file_path = file_rec.path if file_rec else ""
             proj_name = project_names.get(chunk.project_id, "")
 
-            # Use content_text (plain text) if available
             if chunk.content_text:
                 content = chunk.content_text
             else:
@@ -700,13 +775,10 @@ class HybridSearcher:
     ) -> dict:
         """Retrieve the most relevant code for a query.
 
-        Relevance-first approach:
-        1. Search for candidates (already filtered by ``filter_by_relevance``
-           inside ``search()``).
-        2. Apply a secondary relevance floor here (score ratio vs top hit).
-        3. Apply score cliff detection to stop at natural relevance gaps.
-        4. The token budget is a **hard ceiling** (safety net), never a
-           fill target.  No truncation is performed to squeeze more in.
+        Multi-strategy search with fallback:
+        1. Run hybrid search (concept BM25 + vector + file-name matching).
+        2. If no results, retry with individual concept terms (broadening).
+        3. The token budget is a hard ceiling (safety net), not a fill target.
 
         Args:
             query: What to search for.
@@ -724,6 +796,24 @@ class HybridSearcher:
             dedup_strategy=dedup_strategy,
         )
 
+        # --- Fallback: if search returned nothing, try broadening ---
+        if not results:
+            concepts = _extract_query_concepts(query)
+            # Try each concept individually and merge results
+            seen_ids: set[int] = set()
+            for concept in concepts[:5]:
+                fallback = self.search(
+                    concept, limit=5, project_id=project_id,
+                    exclude_chunk_ids=exclude_chunk_ids,
+                    dedup_strategy=dedup_strategy,
+                )
+                for r in fallback:
+                    if r.chunk_id not in seen_ids:
+                        seen_ids.add(r.chunk_id)
+                        results.append(r)
+            # Re-sort by score
+            results.sort(key=lambda r: r.score, reverse=True)
+
         if not results:
             return {
                 "query": query,
@@ -735,29 +825,18 @@ class HybridSearcher:
         header_overhead = 15
         max_chunks_per_file = 3
 
-        # --- Relevance filtering ---
-        # The search() method already ran filter_by_relevance() on the raw
-        # RRF scores (with score-ratio floor, cliff detection, and a
-        # _MIN_RESULTS_FLOOR guarantee).  We trust that filtering here and
-        # do NOT apply a second pass — doing so can amplify score gaps
-        # introduced by boosts/penalties and drop results below the floor,
-        # causing zero-result responses.
-
-        relevant_results = results
-
         # --- Assemble output, respecting token ceiling and per-file cap ---
         selected = []
         tokens_used = 0
         file_chunk_counts: dict[str, int] = {}
 
-        for result in relevant_results:
+        for result in results:
             file_path = result.file_path
             if file_chunk_counts.get(file_path, 0) >= max_chunks_per_file:
                 continue
 
             chunk_tokens = (result.chunk.token_count or 0) + header_overhead
 
-            # Token ceiling: hard stop, no truncation
             if tokens_used + chunk_tokens > token_budget:
                 break
 

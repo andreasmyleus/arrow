@@ -359,6 +359,8 @@ def _collect_chunks(
     if node.type in chunk_types:
         name = _extract_name(node, source_lines)
         kind = _node_kind(node.type)
+        if kind == "function" and parent_name:
+            kind = "method"
         start_line = node.start_point[0] + 1  # 1-indexed
         end_line = node.end_point[0] + 1
         content = "\n".join(source_lines[node.start_point[0] : node.end_point[0] + 1])
@@ -426,6 +428,8 @@ def _collect_chunks_cursor(
         if node.type in chunk_types:
             name = _extract_name(node, source_lines)
             kind = _node_kind(node.type)
+            if kind == "function" and parent_name:
+                kind = "method"
             start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
             content_text = "\n".join(
@@ -591,12 +595,44 @@ _REGEX_PATTERNS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# Universal patterns that work across many languages.  Applied when no
+# language-specific regex set is available, so that unsupported languages
+# still get semantic chunking instead of falling back to dumb line splits.
+_UNIVERSAL_PATTERNS: list[tuple[str, str]] = [
+    # Classes / structs / traits / interfaces
+    (r"^(?:export\s+)?(?:pub(?:\(.+?\))?\s+)?(?:abstract\s+)?class\s+(\w+)", "class"),
+    (r"^(?:pub(?:\(.+?\))?\s+)?struct\s+(\w+)", "class"),
+    (r"^(?:pub(?:\(.+?\))?\s+)?trait\s+(\w+)", "interface"),
+    (r"^(?:pub(?:\(.+?\))?\s+)?interface\s+(\w+)", "interface"),
+    (r"^(?:pub(?:\(.+?\))?\s+)?enum\s+(\w+)", "enum"),
+    (r"^(?:pub(?:\(.+?\))?\s+)?protocol\s+(\w+)", "interface"),
+    # Functions / methods — covers def, fn, func, fun, sub, proc, function
+    (r"^(?:export\s+)?(?:pub(?:\(.+?\))?\s+)?(?:async\s+)?def\s+(\w+)", "function"),
+    (r"^(?:export\s+)?(?:pub(?:\(.+?\))?\s+)?(?:async\s+)?fn\s+(\w+)", "function"),
+    (r"^(?:export\s+)?(?:pub(?:\(.+?\))?\s+)?(?:async\s+)?func\s+(\w+)", "function"),
+    (r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", "function"),
+    (r"^(?:export\s+)?(?:pub(?:\(.+?\))?\s+)?fun\s+(\w+)", "function"),
+    (r"^(?:public|private|protected|internal)?\s*(?:static\s+)?"
+     r"(?:async\s+)?(?:override\s+)?(?:\w+\s+)+(\w+)\s*\(", "function"),
+    (r"^sub\s+(\w+)", "function"),
+    (r"^proc\s+(\w+)", "function"),
+    (r"^(?:let|val)\s+(\w+)\s*[=:]", "function"),
+    # Module-level groupings
+    (r"^(?:pub(?:\(.+?\))?\s+)?(?:mod|module|namespace|package)\s+(\w+)", "module"),
+    (r"^impl(?:<[^>]*>)?\s+(\w+)", "impl"),
+]
 
-def _chunk_file_regex(filepath: Path, content: str, language: str) -> list[Chunk]:
+
+def _chunk_file_regex(
+    filepath: Path, content: str, language: str, *, universal: bool = False
+) -> list[Chunk]:
     """Extract chunks using regex patterns when tree-sitter is unavailable."""
     patterns = _REGEX_PATTERNS.get(language)
     if not patterns:
-        return []
+        if universal:
+            patterns = _UNIVERSAL_PATTERNS
+        else:
+            return []
 
     lines = content.splitlines()
     if not lines:
@@ -606,13 +642,23 @@ def _chunk_file_regex(filepath: Path, content: str, language: str) -> list[Chunk
 
     # Find all definition start lines
     definitions: list[tuple[int, str, str]] = []  # (line_idx, name, kind)
+    # Track class indentation to detect methods
+    class_indent: int | None = None
     for line_idx, line in enumerate(lines):
         stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        # Reset class scope when we leave the class indentation
+        if class_indent is not None and indent <= class_indent and stripped:
+            class_indent = None
         for pattern, kind in patterns:
             m = re.match(pattern, stripped)
             if m:
-                # The name is the last group in the match
                 name = m.group(m.lastindex)
+                # Reclassify indented functions inside classes as methods
+                if kind == "function" and class_indent is not None and indent > class_indent:
+                    kind = "method"
+                if kind == "class":
+                    class_indent = indent
                 definitions.append((line_idx, name, kind))
                 break  # Only match one pattern per line
 
@@ -1138,6 +1184,13 @@ def chunk_file(filepath: Path, content: str) -> list[Chunk]:
         regex_chunks = _chunk_file_regex(filepath, content, language)
         if regex_chunks:
             return regex_chunks
+
+    # Try universal regex patterns before dumb line-based fallback
+    universal_chunks = _chunk_file_regex(
+        filepath, content, language or "", universal=True
+    )
+    if universal_chunks:
+        return universal_chunks
 
     # Fallback for unsupported or failed parsing
     return chunk_file_fallback(filepath, content)

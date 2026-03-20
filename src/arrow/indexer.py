@@ -864,4 +864,26 @@ def _extract_imports(lines: list[str], language: str) -> list[str]:
                             imports.append(stripped[start:idx])
                         break
 
+        else:
+            # Universal fallback: catch common import-like statements
+            for kw in ("import ", "require ", "include ", "use ", "#include "):
+                if stripped.startswith(kw):
+                    rest = stripped[len(kw):].rstrip(";").strip()
+                    # Extract quoted string if present
+                    for q in ('"', "'", "<"):
+                        if q in rest:
+                            close = ">" if q == "<" else q
+                            start = rest.index(q) + 1
+                            end = rest.find(close, start)
+                            if end > start:
+                                imports.append(rest[start:end])
+                            break
+                    else:
+                        # Bare identifier: import Foo.Bar
+                        tok = rest.split()[0] if rest.split() else ""
+                        tok = tok.rstrip(",;")
+                        if tok:
+                            imports.append(tok)
+                    break
+
     return imports

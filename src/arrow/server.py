@@ -623,11 +623,16 @@ def _search_regex_on_disk(
         # Find matching line numbers
         match_line_nos: list[int] = []
         if multiline:
-            # Search full file content so patterns can span lines
+            # Search full file content so patterns can span lines.
+            # Cap match span to 20 lines to avoid runaway matches
+            # (e.g. "except.*?log" spanning hundreds of lines).
+            max_span_lines = 20
             content = "".join(lines)
             for m in compiled.finditer(content):
                 line_no = content.count("\n", 0, m.start())
                 end_line = content.count("\n", 0, m.end())
+                if end_line - line_no > max_span_lines:
+                    continue  # skip matches spanning too many lines
                 for ln in range(line_no, end_line + 1):
                     if ln not in match_line_nos:
                         match_line_nos.append(ln)
@@ -701,9 +706,12 @@ def _search_regex_in_chunks(
         lines = text.split("\n")
         match_line_nos: list[int] = []
         if multiline:
+            max_span_lines = 20
             for m in compiled.finditer(text):
                 line_no = text.count("\n", 0, m.start())
                 end_line = text.count("\n", 0, m.end())
+                if end_line - line_no > max_span_lines:
+                    continue
                 for ln in range(line_no, end_line + 1):
                     if ln not in match_line_nos:
                         match_line_nos.append(ln)
