@@ -811,38 +811,33 @@ class Storage:
         self, name: str, kind: Optional[str] = None, limit: int = 20,
         project_id: Optional[int] = None,
     ) -> list[SymbolRecord]:
+        """Search symbols with exact-match prioritization.
+
+        Results are ordered: exact matches first, then prefix matches.
+        """
+        # Build WHERE clauses
+        conditions = ["s.name LIKE ?"]
+        params: list = [f"{name}%"]
+
+        if kind and kind != "any":
+            conditions.append("s.kind = ?")
+            params.append(kind)
+
         if project_id is not None:
-            if kind and kind != "any":
-                rows = self.conn.execute(
-                    """SELECT s.* FROM symbols s
-                       JOIN files f ON f.id = s.file_id
-                       WHERE s.name LIKE ? AND s.kind = ? AND f.project_id = ?
-                       ORDER BY s.name LIMIT ?""",
-                    (f"{name}%", kind, project_id, limit),
-                ).fetchall()
-            else:
-                rows = self.conn.execute(
-                    """SELECT s.* FROM symbols s
-                       JOIN files f ON f.id = s.file_id
-                       WHERE s.name LIKE ? AND f.project_id = ?
-                       ORDER BY s.name LIMIT ?""",
-                    (f"{name}%", project_id, limit),
-                ).fetchall()
-        else:
-            if kind and kind != "any":
-                rows = self.conn.execute(
-                    """SELECT * FROM symbols
-                       WHERE name LIKE ? AND kind = ?
-                       ORDER BY name LIMIT ?""",
-                    (f"{name}%", kind, limit),
-                ).fetchall()
-            else:
-                rows = self.conn.execute(
-                    """SELECT * FROM symbols
-                       WHERE name LIKE ?
-                       ORDER BY name LIMIT ?""",
-                    (f"{name}%", limit),
-                ).fetchall()
+            conditions.append("f.project_id = ?")
+            params.append(project_id)
+
+        where = " AND ".join(conditions)
+        # Exact matches sort first (0), prefix matches second (1)
+        order = "ORDER BY (CASE WHEN s.name = ? THEN 0 ELSE 1 END), s.name"
+        params_with_order = params + [name, limit]
+
+        query = f"""SELECT s.* FROM symbols s
+                   JOIN files f ON f.id = s.file_id
+                   WHERE {where}
+                   {order} LIMIT ?"""
+
+        rows = self.conn.execute(query, params_with_order).fetchall()
         return [SymbolRecord(**dict(r)) for r in rows]
 
     # -- Project metadata (legacy compat) --

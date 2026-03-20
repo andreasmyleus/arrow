@@ -100,11 +100,45 @@ class TestServerTools:
         assert isinstance(result, list)
         names = [r["name"] for r in result]
         assert "add" in names
+        # Should include source code in results
+        assert "source" in result[0]
+        assert "def add" in result[0]["source"]
 
     def test_search_structure_by_kind(self, setup_server):
         from arrow.server import search_structure
         result = json.loads(search_structure("Helper", kind="class"))
         assert isinstance(result, list)
+
+    def test_search_structure_exact_match_priority(self, setup_server):
+        """Exact matches should exclude prefix matches."""
+        from arrow.server import search_structure
+        result = json.loads(search_structure("add"))
+        names = [r["name"] for r in result]
+        # "add" is an exact match, so "add"-prefixed names (if any) are excluded
+        assert "add" in names
+        # Only exact matches returned when exact exists
+        assert all(n == "add" for n in names)
+
+    def test_search_structure_prefix_fallback(self, setup_server):
+        """When no exact match, prefix matches are returned."""
+        from arrow.server import search_structure
+        # "sub" is not an exact symbol name but "subtract" starts with it
+        result = json.loads(search_structure("sub"))
+        assert isinstance(result, list)
+        names = [r["name"] for r in result]
+        assert any(n.startswith("sub") for n in names)
+
+    def test_search_structure_includes_source(self, setup_server):
+        """Results should include the actual function source code."""
+        from arrow.server import search_structure
+        result = json.loads(search_structure("subtract"))
+        assert len(result) >= 1
+        entry = result[0]
+        assert "source" in entry
+        assert "def subtract" in entry["source"]
+        assert entry["kind"] == "function"
+        assert entry["file"]
+        assert entry["lines"]
 
     def test_trace_dependencies(self, setup_server):
         from arrow.server import trace_dependencies
@@ -214,3 +248,114 @@ class TestMultiProject:
         projects = json.loads(list_projects())
         names = [p["name"] for p in projects]
         assert "testorg/testrepo" in names
+
+
+class TestProjectAutoDetection:
+    """Test that _resolve_project_id auto-detects the current project from cwd."""
+
+    def test_detect_project_from_cwd_matches_root(self, setup_server):
+        """When cwd is the project root, auto-detect returns that project."""
+        project_dir, _, _ = setup_server
+        from arrow.server import _detect_project_from_cwd, _get_storage
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(project_dir)
+            project_id = _detect_project_from_cwd()
+            assert project_id is not None
+
+            # Verify it's the correct project
+            storage = _get_storage()
+            proj = storage.get_project(project_id)
+            assert proj is not None
+            assert str(project_dir) in proj.root_path
+        finally:
+            os.chdir(original_cwd)
+
+    def test_detect_project_from_cwd_matches_subdirectory(self, setup_server):
+        """When cwd is a subdirectory of a project, auto-detect finds it."""
+        project_dir, _, _ = setup_server
+        from arrow.server import _detect_project_from_cwd
+
+        subdir = project_dir / "lib"
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(subdir)
+            project_id = _detect_project_from_cwd()
+            assert project_id is not None
+        finally:
+            os.chdir(original_cwd)
+
+    def test_detect_project_from_unrelated_dir(self, setup_server):
+        """When cwd is not inside any project, returns None."""
+        _, _, _ = setup_server
+        from arrow.server import _detect_project_from_cwd
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(tempfile.mkdtemp())
+            project_id = _detect_project_from_cwd()
+            assert project_id is None
+        finally:
+            os.chdir(original_cwd)
+
+    def test_resolve_project_id_auto_scopes_to_cwd(self, setup_server):
+        """_resolve_project_id(None) returns the cwd project, not None."""
+        project_dir, _, _ = setup_server
+        from arrow.server import _resolve_project_id
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(project_dir)
+            project_id = _resolve_project_id(None)
+            # Should NOT be None — should auto-detect the project
+            assert project_id is not None
+        finally:
+            os.chdir(original_cwd)
+
+    def test_resolve_project_id_explicit_name_still_works(self, setup_server):
+        """Explicit project name takes priority over cwd detection."""
+        project_dir, _, _ = setup_server
+        from arrow.server import _resolve_project_id, _get_storage, _PROJECT_NOT_FOUND
+
+        storage = _get_storage()
+        projects = storage.list_projects()
+        project_name = projects[0].name
+
+        project_id = _resolve_project_id(project_name)
+        assert project_id is not None
+        assert project_id != _PROJECT_NOT_FOUND
+        assert project_id == projects[0].id
+
+    def test_resolve_project_id_invalid_name_returns_not_found(self, setup_server):
+        """Explicit but invalid project name returns _PROJECT_NOT_FOUND."""
+        _, _, _ = setup_server
+        from arrow.server import _resolve_project_id, _PROJECT_NOT_FOUND
+
+        project_id = _resolve_project_id("nonexistent/project")
+        assert project_id == _PROJECT_NOT_FOUND
+
+    def test_search_code_scoped_to_cwd_project(self, setup_server):
+        """search_code without project= only returns results from cwd project."""
+        project_dir, _, _ = setup_server
+        from arrow.server import index_github_content, search_code
+
+        # Index a second project with overlapping keyword
+        index_github_content(
+            owner="other",
+            repo="repo",
+            branch="main",
+            files=[
+                {"path": "utils.py", "content": "def add(x, y):\n    return x + y\n"},
+            ],
+        )
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(project_dir)
+            result = search_code("add")
+            # Should only contain results from the cwd project, not other/repo
+            assert "other/repo" not in result
+            assert "Found" in result
+        finally:
+            os.chdir(original_cwd)

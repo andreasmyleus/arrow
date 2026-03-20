@@ -14,6 +14,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from .chunker import decompress_content
 from .config import get_config
 from .embedder import Embedder, get_embedder
 from .git_utils import is_git_repo
@@ -174,16 +175,59 @@ def _start_all_watchers() -> None:
                     _start_watcher(project.id, root)
 
 
+def _detect_project_from_cwd() -> int | None:
+    """Auto-detect the current project from cwd.
+
+    Walks up to git root and checks if any indexed project has that root path.
+    If cwd is inside a project directory, returns that project's ID.
+    Returns None if no matching project is found (fall back to all-projects).
+    """
+    cwd = Path.cwd().resolve()
+    if not cwd.is_dir():
+        return None
+
+    # Walk up to git root
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        root = Path(result.stdout.strip()).resolve()
+    except Exception:
+        root = cwd
+
+    storage = _get_storage()
+
+    # Check if the git root matches an indexed project
+    proj = storage.get_project_by_root(str(root))
+    if proj:
+        return proj.id
+
+    # Also check if cwd itself is inside any indexed project's root
+    # (e.g., cwd is a subdirectory of the project root)
+    cwd_str = str(cwd)
+    for p in storage.list_projects():
+        if p.root_path and not p.is_remote and cwd_str.startswith(p.root_path):
+            return p.id
+
+    return None
+
+
 def _resolve_project_id(project: str | None) -> int | None:
     """Resolve optional project name to project_id.
 
-    Returns None if project is None (search all projects).
+    When project is None, auto-detects the current project from cwd to avoid
+    cross-project contamination (e.g., returning pydantic results when working
+    in the arrow repo). Falls back to all-projects search only if cwd doesn't
+    match any indexed project.
+
+    Returns None if no project can be determined (search all projects).
     Returns the project ID if found.
     Returns _PROJECT_NOT_FOUND (-1) if the project name was given but not
     found, so callers don't silently fall back to all-projects search.
     """
     if project is None:
-        return None
+        return _detect_project_from_cwd()
     storage = _get_storage()
     proj = storage.get_project_by_name(project)
     if proj is None:
@@ -468,30 +512,35 @@ def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
 
 @mcp.tool()
 def search_regex(
-    pattern: str, limit: int = 20, project: str | None = None
+    pattern: str,
+    limit: int = 50,
+    context_lines: int = 2,
+    project: str | None = None,
 ) -> str:
-    """Search indexed code with a regex pattern.
+    """Search code with a regex pattern, showing matched lines with context.
 
-    Unlike search_code (which uses BM25 + vector similarity), this does
-    exact regex matching against chunk content. Useful for finding specific
-    patterns like error codes, magic strings, or complex expressions.
+    Searches actual files on disk (like grep -n -C) for precise line-level
+    results. Falls back to searching indexed chunks for remote projects.
 
     Args:
-        pattern: Python regex pattern (e.g. r"def test_.*auth").
-        limit: Maximum results (default 20).
+        pattern: Python regex pattern (e.g. r"except.*:.*log", r"os\\.environ").
+        limit: Maximum number of matching lines to return (default 50).
+        context_lines: Lines of context around each match, like grep -C (default 2).
         project: Optional project name to scope search.
 
     Returns:
-        Matching code chunks with highlighted pattern context.
+        Matched lines with file:line references and surrounding context,
+        grouped by file. Matches are highlighted with >> markers.
     """
     if not pattern or not pattern.strip():
         return json.dumps({"error": "pattern is required"})
     if limit <= 0:
         return json.dumps({"error": "limit must be a positive integer"})
-    limit = min(limit, 100)
+    limit = min(limit, 500)
+    context_lines = max(0, min(context_lines, 10))
 
     try:
-        re.compile(pattern)
+        compiled = re.compile(pattern)
     except re.error as exc:
         return json.dumps({"error": f"Invalid regex: {exc}"})
 
@@ -506,55 +555,240 @@ def search_regex(
         return err
 
     t0 = time.time()
-    matches = storage.search_regex(
-        pattern, limit=limit, project_id=project_id
-    )
-    latency = (time.time() - t0) * 1000
 
+    # Determine project root for on-disk search
+    project_root = None
+    if project_id is not None and project_id != _PROJECT_NOT_FOUND:
+        proj_rec = storage.get_project(project_id)
+        if proj_rec and proj_rec.root_path and not proj_rec.is_remote:
+            root_path = Path(proj_rec.root_path)
+            if root_path.is_dir():
+                project_root = root_path
+
+    if project_root:
+        # On-disk search: grep actual files for precise line-level results
+        results = _search_regex_on_disk(
+            compiled, project_root, limit, context_lines
+        )
+    else:
+        # Fallback: search indexed chunks (for remote projects or no root)
+        results = _search_regex_in_chunks(
+            compiled, storage, project_id, limit, context_lines
+        )
+
+    latency = (time.time() - t0) * 1000
     storage.record_tool_call(
         "search_regex", latency, project_id=project_id
     )
 
-    chunks = []
-    for chunk in matches:
-        file_rec = storage.get_file_by_id(chunk.file_id)
-        proj = (
-            storage.get_project(chunk.project_id)
-            if chunk.project_id else None
-        )
-        chunks.append({
-            "file": file_rec.path if file_rec else "",
-            "project": proj.name if proj else "",
-            "name": chunk.name,
-            "kind": chunk.kind,
-            "lines": f"{chunk.start_line}-{chunk.end_line}",
-            "content": chunk.content_text or "",
-            "tokens": chunk.token_count or 0,
-        })
+    return results
 
-    return f"Regex /{pattern}/ — {len(chunks)} matches\n\n" + _fmt_chunks(
-        chunks
+
+def _search_regex_on_disk(
+    compiled: re.Pattern,
+    project_root: Path,
+    limit: int,
+    context_lines: int,
+) -> str:
+    """Search files on disk with regex, returning grep-like output."""
+    from .discovery import discover_files
+
+    match_groups: list[dict] = []
+    total_matches = 0
+
+    for filepath in discover_files(project_root):
+        if total_matches >= limit:
+            break
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        # Find matching line numbers
+        match_line_nos = []
+        for i, line in enumerate(lines):
+            if compiled.search(line):
+                match_line_nos.append(i)
+
+        if not match_line_nos:
+            continue
+
+        # Build context groups (merge overlapping contexts)
+        rel_path = str(filepath.relative_to(project_root))
+        file_matches: list[dict] = []
+
+        for match_line in match_line_nos:
+            if total_matches >= limit:
+                break
+            total_matches += 1
+
+            ctx_start = max(0, match_line - context_lines)
+            ctx_end = min(len(lines), match_line + context_lines + 1)
+
+            # Merge with previous group if contexts overlap
+            if file_matches and file_matches[-1]["ctx_end"] >= ctx_start:
+                prev = file_matches[-1]
+                prev["ctx_end"] = ctx_end
+                prev["match_lines"].append(match_line)
+            else:
+                file_matches.append({
+                    "ctx_start": ctx_start,
+                    "ctx_end": ctx_end,
+                    "match_lines": [match_line],
+                })
+
+        if file_matches:
+            match_groups.append({
+                "file": rel_path,
+                "abs_path": str(filepath),
+                "groups": file_matches,
+                "lines": lines,
+            })
+
+    return _format_regex_results(compiled, match_groups, total_matches)
+
+
+def _search_regex_in_chunks(
+    compiled: re.Pattern,
+    storage: Storage,
+    project_id: int | None,
+    limit: int,
+    context_lines: int,
+) -> str:
+    """Search indexed chunks with regex (fallback for remote projects)."""
+    chunks = storage.search_regex(
+        compiled.pattern, limit=limit * 3, project_id=project_id
     )
+
+    match_groups: list[dict] = []
+    total_matches = 0
+
+    for chunk in chunks:
+        if total_matches >= limit:
+            break
+        file_rec = storage.get_file_by_id(chunk.file_id)
+        if not file_rec:
+            continue
+
+        text = chunk.content_text or ""
+        lines = text.split("\n")
+        match_line_nos = []
+        for i, line in enumerate(lines):
+            if compiled.search(line):
+                match_line_nos.append(i)
+
+        if not match_line_nos:
+            continue
+
+        file_matches: list[dict] = []
+        for match_line in match_line_nos:
+            if total_matches >= limit:
+                break
+            total_matches += 1
+
+            ctx_start = max(0, match_line - context_lines)
+            ctx_end = min(len(lines), match_line + context_lines + 1)
+
+            if file_matches and file_matches[-1]["ctx_end"] >= ctx_start:
+                prev = file_matches[-1]
+                prev["ctx_end"] = ctx_end
+                prev["match_lines"].append(match_line)
+            else:
+                file_matches.append({
+                    "ctx_start": ctx_start,
+                    "ctx_end": ctx_end,
+                    "match_lines": [match_line],
+                })
+
+        if file_matches:
+            match_groups.append({
+                "file": file_rec.path,
+                "abs_path": file_rec.path,
+                "groups": file_matches,
+                "lines": lines,
+                "line_offset": chunk.start_line,
+            })
+
+    return _format_regex_results(compiled, match_groups, total_matches)
+
+
+def _format_regex_results(
+    compiled: re.Pattern,
+    match_groups: list[dict],
+    total_matches: int,
+) -> str:
+    """Format regex results in a grep-like style with context."""
+    if not match_groups:
+        return f"Regex /{compiled.pattern}/ — 0 matches"
+
+    parts = [
+        f"Regex /{compiled.pattern}/ — {total_matches} matches "
+        f"in {len(match_groups)} files\n"
+    ]
+
+    for file_group in match_groups:
+        file_path = file_group["file"]
+        lines = file_group["lines"]
+        line_offset = file_group.get("line_offset", 1)  # 1-based for on-disk
+        parts.append(f"# {file_path}")
+
+        for group in file_group["groups"]:
+            ctx_start = group["ctx_start"]
+            ctx_end = group["ctx_end"]
+            match_lines_set = set(group["match_lines"])
+
+            for i in range(ctx_start, ctx_end):
+                if i >= len(lines):
+                    break
+                line_text = lines[i].rstrip("\n") if isinstance(lines[i], str) else lines[i]
+                line_no = i + line_offset
+                is_match = i in match_lines_set
+
+                if is_match:
+                    # Highlight the match with >>> <<< markers
+                    highlighted = compiled.sub(
+                        lambda m: f">>>{m.group(0)}<<<", line_text
+                    )
+                    parts.append(f"  {line_no:>5} >> {highlighted}")
+                else:
+                    parts.append(f"  {line_no:>5}    {line_text}")
+
+            # Separator between groups within same file
+            if group != file_group["groups"][-1]:
+                parts.append("        ...")
+
+        parts.append("")  # blank line between files
+
+    return "\n".join(parts)
 
 
 @mcp.tool()
 def get_context(
-    query: str, token_budget: int = 0, project: str | None = None
+    query: str, token_budget: int = 0, project: str | None = None,
+    deduplicate: bool = True,
 ) -> str:
-    """Get the most relevant code for a query, compressed to fit a token budget.
+    """Get the most relevant code for a query using relevance-first retrieval.
 
-    This is the primary tool. It runs hybrid search, ranks results, and
-    returns the most relevant code fitting within the specified token budget.
+    This is the primary tool. It runs hybrid search, ranks results by
+    relevance, and returns only chunks that pass relevance thresholds.
+    The number of results is driven by relevance scores, not by filling
+    a token budget.
 
     Args:
         query: What you're looking for (natural language or keywords).
-        token_budget: Maximum tokens to return. Set to 0 (default) for
-                      automatic budget based on query complexity. Simple
-                      lookups get ~500 tokens, broad questions get ~8000+.
+        token_budget: Hard token ceiling (safety net). Set to 0 (default)
+                      for automatic ceiling based on query type. The ceiling
+                      prevents runaway responses but is never a fill target —
+                      most queries return well under the ceiling.
         project: Optional project name to scope search. Omit for all projects.
+        deduplicate: Whether to deprioritize chunks already sent in this
+                     session. When True (default), previously sent chunks
+                     are demoted in ranking but still returned if highly
+                     relevant. Set to False to treat every query independently.
 
     Returns:
-        JSON with the most relevant code chunks within the token budget.
+        The most relevant code chunks (only those passing relevance cutoffs).
     """
     if not query or not query.strip():
         return json.dumps({"error": "query is required"})
@@ -572,22 +806,29 @@ def get_context(
 
     searcher = _get_searcher()
 
-    # Resolve budget: caller arg > config > unlimited
+    # Resolve budget: caller arg > config > auto-estimate
     cfg = get_config()
     if token_budget <= 0:
-        token_budget = cfg.search.token_budget  # 0 = unlimited
+        token_budget = cfg.search.token_budget  # 0 = auto
     auto = token_budget <= 0
+    search_limit = 50  # default for explicit budgets
+    query_classification = None
     if auto:
-        token_budget = 999_999  # effectively unlimited
+        token_budget, search_limit, query_classification = (
+            searcher.estimate_budget(query, project_id=project_id)
+        )
 
-    # Conversation-aware: exclude already-sent chunks
+    # Conversation-aware dedup: penalize or skip already-sent chunks
     sent = storage.get_sent_chunk_ids(_session_id)
     session_tokens = storage.get_session_token_total(_session_id)
+    dedup_strategy = "penalize" if deduplicate else "none"
 
     t0 = time.time()
     context = searcher.get_context(
         query, token_budget=token_budget, project_id=project_id,
         exclude_chunk_ids=sent, frecency_boost=cfg.search.frecency_boost,
+        dedup_strategy=dedup_strategy,
+        search_limit=search_limit,
     )
     latency = (time.time() - t0) * 1000
 
@@ -623,10 +864,10 @@ def get_context(
             "- Use file_summary() if you know the file path"
         )
 
-    budget_str = "unlimited" if auto else f"{context['token_budget']}t"
+    budget_str = f"{context['token_budget']}t ({context['budget_mode']})"
     meta = (
         f"query: {query}\n"
-        f"budget: {budget_str} ({context['budget_mode']}) "
+        f"budget: {budget_str} "
         f"| used: {context['tokens_used']}t "
         f"| {context['chunks_returned']}/{context['chunks_searched']} chunks"
     )
@@ -642,46 +883,80 @@ def search_structure(
 ) -> str:
     """Find functions, classes, or variables by name via the AST structure index.
 
+    Returns precise results with source code included. Exact name matches
+    are returned exclusively when found; prefix matches are only included
+    when there is no exact match.
+
     Args:
-        symbol: Name to search for (supports prefix matching).
-        kind: Filter by kind: "function", "class", "method", "any" (default).
+        symbol: Name to search for. Exact matches prioritized over prefix.
+        kind: Filter by kind: "function", "class", "method", "any".
         project: Optional project name to scope search.
 
     Returns:
-        JSON array of matching symbol definitions.
+        JSON array of matching definitions with source code.
     """
-    _VALID_KINDS = {"function", "class", "method", "any"}
+    valid_kinds = {"function", "class", "method", "any"}
     storage = _get_storage()
     if not symbol or not symbol.strip():
         return json.dumps({"error": "symbol is required"})
 
-    if kind not in _VALID_KINDS:
+    if kind not in valid_kinds:
         return json.dumps({
-            "error": f"Invalid kind: {kind!r}. Must be one of: {', '.join(sorted(_VALID_KINDS))}",
+            "error": (
+                f"Invalid kind: {kind!r}. "
+                f"Must be one of: {', '.join(sorted(valid_kinds))}"
+            ),
         })
 
     err = _ensure_indexed()
     if err:
         return err
 
+    symbol_name = symbol.strip()
     project_id = _resolve_project_id(project)
     symbols = storage.search_symbols(
-        symbol.strip(), kind=kind if kind != "any" else None, project_id=project_id
+        symbol_name,
+        kind=kind if kind != "any" else None,
+        project_id=project_id,
     )
 
+    # If we have exact matches, only return those — avoids prefix noise
+    # (e.g. searching "search" returning "search_code", "search_fts", …)
+    exact = [s for s in symbols if s.name == symbol_name]
+    matched = exact if exact else symbols
+
+    # Deduplicate by chunk_id
+    seen_chunks: set[int] = set()
     output = []
-    for sym in symbols:
+    for sym in matched:
+        if sym.chunk_id in seen_chunks:
+            continue
+        seen_chunks.add(sym.chunk_id)
+
         chunk = storage.get_chunk_by_id(sym.chunk_id)
-        if chunk:
-            file_rec = storage.get_file_by_id(chunk.file_id)
-            proj = storage.get_project(chunk.project_id) if chunk.project_id else None
-            output.append({
-                "name": sym.name,
-                "kind": sym.kind,
-                "file": file_rec.path if file_rec else "",
-                "project": proj.name if proj else "",
-                "lines": f"{chunk.start_line}-{chunk.end_line}",
-            })
+        if not chunk:
+            continue
+
+        file_rec = storage.get_file_by_id(chunk.file_id)
+        proj = (
+            storage.get_project(chunk.project_id)
+            if chunk.project_id else None
+        )
+
+        # Include actual source so callers don't need a separate Read
+        try:
+            source = decompress_content(chunk.content)
+        except Exception:
+            source = chunk.content_text or ""
+
+        output.append({
+            "name": sym.name,
+            "kind": sym.kind,
+            "file": file_rec.path if file_rec else "",
+            "project": proj.name if proj else "",
+            "lines": f"{chunk.start_line}-{chunk.end_line}",
+            "source": source,
+        })
 
     return json.dumps(output, indent=2)
 

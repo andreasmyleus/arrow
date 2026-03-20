@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re as _re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -19,6 +20,48 @@ logger = logging.getLogger(__name__)
 _NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
 
 _TEST_PATH_MARKERS = ("test_", "_test.", "tests/", "__tests__/", "spec/", "/test/")
+
+# Keywords that signal the user wants documentation, not source code
+_DOC_QUERY_KEYWORDS = {
+    "tool", "tools", "list", "expose", "api", "usage", "readme",
+    "documentation", "docs", "doc", "overview", "getting started",
+    "install", "installation", "guide", "reference", "help",
+    "commands", "options", "features", "available", "supported",
+    "endpoints", "configuration", "config",
+}
+
+_DOC_QUERY_PHRASES = (
+    "what does", "how to", "getting started", "mcp tool", "mcp server",
+    "what mcp", "list of", "how do i", "what are",
+)
+
+_DOC_PATH_MARKERS = ("readme", "changelog", "contributing", "guide", "docs/")
+
+
+def _is_doc_query(query_lower: str) -> bool:
+    """Check if a query is asking about documentation/overview information."""
+    words = set(query_lower.split())
+    if words & _DOC_QUERY_KEYWORDS:
+        return True
+    for phrase in _DOC_QUERY_PHRASES:
+        if phrase in query_lower:
+            return True
+    return False
+
+
+def _is_doc_path(path_lower: str) -> bool:
+    """Check if a file path looks like documentation."""
+    return any(m in path_lower for m in _DOC_PATH_MARKERS)
+
+
+# --- Precision filtering constants ---
+# Results scoring below this fraction of the top result's score are dropped.
+_MIN_SCORE_RATIO = 0.4
+# If a result's score drops by more than this factor vs the previous result,
+# treat it as a relevance cliff and stop including results beyond that point.
+_SCORE_DROP_RATIO = 0.5
+# Never cut below this many results (protects very small result sets).
+_MIN_RESULTS_FLOOR = 1
 
 
 def _is_test_path(path_lower: str) -> bool:
@@ -66,6 +109,184 @@ def reciprocal_rank_fusion(
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 
+def filter_by_relevance(
+    scored: list[tuple[int, float]],
+    min_score_ratio: float = _MIN_SCORE_RATIO,
+    drop_ratio: float = _SCORE_DROP_RATIO,
+    floor: int = _MIN_RESULTS_FLOOR,
+) -> list[tuple[int, float]]:
+    """Remove low-relevance tail from a scored result list.
+
+    Two independent filters (whichever cuts more aggressively wins):
+
+    1. **Minimum score ratio** — drop any result whose score is less than
+       ``min_score_ratio`` of the top result's score.
+    2. **Score drop-off** — if result *i*'s score is less than
+       ``drop_ratio`` of result *i-1*'s score, discard result *i* and
+       everything after it (a "relevance cliff").
+
+    At least ``floor`` results are always kept regardless.
+
+    The input list must be sorted descending by score (as returned by
+    ``reciprocal_rank_fusion``).
+    """
+    if len(scored) <= floor:
+        return scored
+
+    top_score = scored[0][1] if scored else 0.0
+    if top_score <= 0:
+        return scored[:floor]
+
+    cutoff = floor  # index up to which we keep results
+    prev_score = top_score
+    for i, (_cid, score) in enumerate(scored):
+        if i < floor:
+            prev_score = score
+            continue
+        # Check absolute relevance vs top result
+        if score / top_score < min_score_ratio:
+            break
+        # Check relative drop vs previous result
+        if prev_score > 0 and score / prev_score < drop_ratio:
+            break
+        cutoff = i + 1
+        prev_score = score
+    else:
+        # Loop completed without break — keep everything
+        cutoff = len(scored)
+
+    return scored[:max(cutoff, floor)]
+
+
+# ─── Query classification ───────────────────────────────────────────────
+
+# File extensions and well-known filenames that indicate a targeted lookup
+_FILE_PATTERN = _re.compile(
+    r"\b\w+\.(py|js|ts|tsx|jsx|go|rs|java|rb|c|cpp|h|hpp|toml|yaml|yml|json"
+    r"|md|txt|cfg|ini|sh|bash|sql|html|css|xml|proto|lock)\b",
+    _re.IGNORECASE,
+)
+_WELL_KNOWN_FILES = _re.compile(
+    r"\b(Dockerfile|Makefile|Jenkinsfile|Procfile|Gemfile|Rakefile"
+    r"|docker-compose|\.github|\.gitignore|README|CHANGELOG|LICENSE"
+    r"|pyproject|setup\.py|setup\.cfg|package\.json|tsconfig"
+    r"|Cargo\.toml|go\.mod|pom\.xml|build\.gradle)\b",
+    _re.IGNORECASE,
+)
+
+# Patterns suggesting a specific function/class/symbol lookup
+_SYMBOL_CALL_RE = _re.compile(
+    r"\b\w+\(\)"           # "authenticate()"
+    r"|\bdef\s+\w+"        # "def authenticate"
+    r"|\bclass\s+\w+"      # "class Storage"
+    r"|\bfunction\s+\w+"   # "function handleRequest"
+)
+
+# Broad/architectural query indicators
+_BROAD_INDICATORS = _re.compile(
+    r"\b(how does|walk me through|architecture|patterns?|across|overview"
+    r"|end.to.end|e2e|cross.cutting|review|throughout|design"
+    r"|approach|strateg(?:y|ies)|workflow|pipeline)\b",
+    _re.IGNORECASE,
+)
+
+# Single-concept keywords (short queries about one specific thing)
+_SINGLE_CONCEPT_WORDS = frozenset({
+    "docker", "dockerfile", "ci", "cd", "healthcheck", "health",
+    "makefile", "readme", "changelog", "license", "setup",
+    "logging", "auth", "authentication", "database", "cache",
+    "caching", "deploy", "deployment", "lint", "linting", "build",
+    "nginx", "redis", "postgres", "kafka", "rabbitmq", "celery",
+})
+
+
+@dataclass
+class QueryClassification:
+    """Result of classifying a search query as targeted or broad."""
+
+    query_type: str  # "targeted" or "broad"
+    confidence: float  # 0.0 to 1.0
+    reason: str
+    suggested_budget: int  # token budget hint
+    suggested_limit: int  # search result limit hint
+
+
+def classify_query(query: str) -> QueryClassification:
+    """Classify a query as targeted (specific file/function) or broad (architectural).
+
+    Targeted queries mention specific files, functions, or single concepts.
+    They need small budgets (500-2000 tokens) and few results.
+
+    Broad queries ask about patterns, architecture, or cross-cutting concerns.
+    They need larger budgets (3000-6000 tokens) and more results.
+    """
+    words = query.split()
+    word_count = len(words)
+    query_lower = query.lower()
+
+    targeted_signals = 0
+    broad_signals = 0
+    reasons: list[str] = []
+
+    # Signal: mentions a filename or file extension
+    if _FILE_PATTERN.search(query) or _WELL_KNOWN_FILES.search(query):
+        targeted_signals += 3
+        reasons.append("mentions file")
+
+    # Signal: mentions a function/symbol explicitly
+    if _SYMBOL_CALL_RE.search(query):
+        targeted_signals += 2
+        reasons.append("mentions symbol")
+
+    # Signal: very short query (1-4 words) — likely about a single thing
+    if word_count <= 4:
+        targeted_signals += 1
+        reasons.append("short query")
+        # Extra boost for known single-concept words
+        if any(w in _SINGLE_CONCEPT_WORDS for w in query_lower.split()):
+            targeted_signals += 1
+            reasons.append("single concept")
+
+    # Signal: broad patterns/architecture language
+    if _BROAD_INDICATORS.search(query):
+        broad_signals += 2
+        reasons.append("broad language")
+
+    # Signal: longer queries tend to be broader
+    if word_count >= 10:
+        broad_signals += 1
+        reasons.append("long query")
+
+    # Signal: question with broad scope
+    if word_count >= 6 and any(
+        query_lower.startswith(w) for w in ("how ", "what ", "where ", "why ")
+    ):
+        broad_signals += 1
+        reasons.append("broad question")
+
+    # Decide classification
+    reason_str = "; ".join(reasons) if reasons else "default"
+
+    if targeted_signals > broad_signals:
+        if targeted_signals >= 3:
+            return QueryClassification("targeted", 0.9, reason_str, 1000, 5)
+        return QueryClassification("targeted", 0.7, reason_str, 1500, 8)
+
+    if broad_signals > targeted_signals:
+        if broad_signals >= 3:
+            return QueryClassification("broad", 0.9, reason_str, 6000, 30)
+        return QueryClassification("broad", 0.7, reason_str, 4000, 20)
+
+    # Ambiguous — use query length as tiebreaker
+    if word_count < 6:
+        return QueryClassification(
+            "targeted", 0.4, "ambiguous; " + reason_str, 2000, 10,
+        )
+    return QueryClassification(
+        "broad", 0.4, "ambiguous; " + reason_str, 3000, 20,
+    )
+
+
 class HybridSearcher:
     """Combines BM25 and vector search with reciprocal rank fusion."""
 
@@ -95,6 +316,7 @@ class HybridSearcher:
         project_id: Optional[int] = None,
         frecency_boost: bool = False,
         exclude_chunk_ids: Optional[set[int]] = None,
+        dedup_strategy: str = "penalize",
     ) -> list[SearchResult]:
         """Hybrid search combining BM25 and vector similarity.
 
@@ -104,6 +326,11 @@ class HybridSearcher:
             fts_limit: Max FTS candidates.
             vec_limit: Max vector candidates.
             project_id: Optional project filter. None = search all projects.
+            exclude_chunk_ids: Chunk IDs already sent in this session.
+            dedup_strategy: How to handle already-sent chunks:
+                "none" - no dedup, ignore exclude_chunk_ids entirely
+                "penalize" - demote already-sent chunks by 50% (default)
+                "exclude" - hard-exclude already-sent chunks (legacy)
         """
         ranked_lists = []
 
@@ -154,12 +381,25 @@ class HybridSearcher:
         # Reciprocal rank fusion
         fused = reciprocal_rank_fusion(ranked_lists)
 
-        # Filter out already-sent chunks (conversation awareness)
-        if exclude_chunk_ids:
-            fused = [
-                (cid, s) for cid, s in fused
-                if cid not in exclude_chunk_ids
-            ]
+        # Conversation-aware dedup for already-sent chunks
+        if exclude_chunk_ids and dedup_strategy != "none":
+            if dedup_strategy == "exclude":
+                # Legacy: hard-exclude already-sent chunks entirely
+                fused = [
+                    (cid, s) for cid, s in fused
+                    if cid not in exclude_chunk_ids
+                ]
+            else:
+                # "penalize" (default): demote already-sent chunks by 50%
+                # so they still appear when highly relevant but rank lower
+                penalty = 0.5
+                fused = [
+                    (cid, s * penalty) if cid in exclude_chunk_ids
+                    else (cid, s)
+                    for cid, s in fused
+                ]
+                # Re-sort after applying penalty
+                fused.sort(key=lambda x: x[1], reverse=True)
 
         # Apply frecency boost
         if frecency_boost:
@@ -187,8 +427,7 @@ class HybridSearcher:
                     boosted, key=lambda x: x[1], reverse=True
                 )
 
-        # Penalize non-code files (json, markdown, etc.) so they don't
-        # dominate results over actual source code
+        # Apply file-type scoring adjustments based on query intent
         penalty_ids = [cid for cid, _ in fused[:limit * 3]]
         if penalty_ids:
             penalty_chunks = {
@@ -206,6 +445,7 @@ class HybridSearcher:
             query_mentions_test = any(
                 t in ("test", "tests", "testing", "spec") for t in query_terms
             )
+            query_is_doc = _is_doc_query(query.lower())
 
             penalized = []
             for cid, score in fused:
@@ -214,9 +454,17 @@ class HybridSearcher:
                 if frec:
                     path_lower = frec.path.lower()
 
-                    # Non-code penalty (existing)
+                    # File-type scoring: boost or penalize based on query intent
                     if frec.language in _NON_CODE_LANGS:
-                        score = score * get_config().search.non_code_penalty
+                        if query_is_doc and _is_doc_path(path_lower):
+                            # Doc query + doc file (README, etc.): strong boost
+                            score = score * 2.5
+                        elif query_is_doc and frec.language == "markdown":
+                            # Doc query + any markdown file: mild boost
+                            score = score * 1.3
+                        else:
+                            # Non-doc query: penalize non-code files as before
+                            score = score * get_config().search.non_code_penalty
 
                     # Path boost: if query terms appear in the file path
                     if query_terms and any(t in path_lower for t in query_terms):
@@ -228,6 +476,9 @@ class HybridSearcher:
 
                 penalized.append((cid, score))
             fused = sorted(penalized, key=lambda x: x[1], reverse=True)
+
+        # Precision filtering: drop low-relevance tail before materialising
+        fused = filter_by_relevance(fused)
 
         # Batch fetch chunks and files to avoid N+1 queries
         top = fused[:limit]
@@ -291,48 +542,74 @@ class HybridSearcher:
         return results
 
     def estimate_budget(
-        self, query: str, project_id: Optional[int] = None
-    ) -> int:
-        """Estimate optimal token budget based on query complexity.
+        self, query: str, project_id: Optional[int] = None,
+        classification: Optional[QueryClassification] = None,
+    ) -> tuple[int, int, QueryClassification]:
+        """Estimate a token ceiling and search limit for a query.
 
-        Simple symbol lookups need ~500 tokens. Broad architectural
-        questions need ~8000+. Uses FTS hit count as a proxy for scope.
+        The token budget is a **safety ceiling**, not a fill target.
+        Relevance filtering (score cutoff + cliff detection) is the
+        primary control for how many results are returned.  The budget
+        just prevents runaway responses.
+
+        Returns:
+            (token_ceiling, search_limit, classification)
         """
-        hit_count = self.storage.count_fts_hits(query, project_id=project_id)
-        word_count = len(query.split())
+        if classification is None:
+            classification = classify_query(query)
 
-        # Heuristics for budget estimation
-        if hit_count <= 2 and word_count <= 3:
-            return 500   # Simple symbol lookup
-        if hit_count <= 5 and word_count <= 4:
-            return 1500  # Focused question
-        if hit_count <= 15:
-            return 3000  # Moderate scope
-        if hit_count <= 30:
-            return 5000  # Broad question
-        if hit_count <= 60:
-            return 8000  # Architectural review
-        return 12000     # Very broad / exploratory
+        hit_count = self.storage.count_fts_hits(query, project_id=project_id)
+
+        if classification.query_type == "targeted":
+            # Targeted: generous ceiling — relevance filter does the work
+            budget = 4000
+            limit = classification.suggested_limit
+        else:
+            # Broad: larger ceiling
+            budget = 8000
+            limit = classification.suggested_limit
+
+        logger.debug(
+            "Budget ceiling: query=%r type=%s confidence=%.1f ceiling=%d "
+            "limit=%d hits=%d reason=%s",
+            query, classification.query_type, classification.confidence,
+            budget, limit, hit_count, classification.reason,
+        )
+
+        return budget, limit, classification
 
     def get_context(
         self, query: str, token_budget: int = 8000,
         project_id: Optional[int] = None,
         exclude_chunk_ids: Optional[set[int]] = None,
         frecency_boost: bool = False,
+        dedup_strategy: str = "penalize",
+        search_limit: int = 50,
     ) -> dict:
-        """Retrieve the most relevant code fitting within a token budget.
+        """Retrieve the most relevant code for a query.
+
+        Relevance-first approach:
+        1. Search for candidates (already filtered by ``filter_by_relevance``
+           inside ``search()``).
+        2. Apply a secondary relevance floor here (score ratio vs top hit).
+        3. Apply score cliff detection to stop at natural relevance gaps.
+        4. The token budget is a **hard ceiling** (safety net), never a
+           fill target.  No truncation is performed to squeeze more in.
 
         Args:
             query: What to search for.
-            token_budget: Max tokens to return.
+            token_budget: Hard token ceiling (safety net, not a fill target).
             project_id: Optional project filter. None = all projects.
             exclude_chunk_ids: Chunk IDs to skip (already sent).
             frecency_boost: Boost recently accessed files.
+            dedup_strategy: "none", "penalize" (default), or "exclude".
+            search_limit: Max search results to consider (default 50).
         """
         results = self.search(
-            query, limit=50, project_id=project_id,
+            query, limit=search_limit, project_id=project_id,
             exclude_chunk_ids=exclude_chunk_ids,
             frecency_boost=frecency_boost,
+            dedup_strategy=dedup_strategy,
         )
 
         if not results:
@@ -343,48 +620,58 @@ class HybridSearcher:
                 "chunks": [],
             }
 
-        HEADER_OVERHEAD = 15
-        MAX_CHUNKS_PER_FILE = 3
+        header_overhead = 15
+        max_chunks_per_file = 3
+
+        # --- Relevance-first filtering ---
+        # The search() method already ran filter_by_relevance() on the raw
+        # RRF scores.  Here we apply a second pass on materialised results
+        # to catch anything that slipped through (e.g. after frecency boost
+        # or penalty adjustments changed the ordering).
+
+        top_score = results[0].score
+        if top_score <= 0:
+            top_score = 1.0
+
+        # 1) Absolute relevance floor: drop anything < 40% of top score
+        relevance_floor = _MIN_SCORE_RATIO  # 0.4
+
+        # 2) Score cliff detection: stop when a result's score drops to
+        #    < 50% of the *previous* result's score (big gap = irrelevant tail)
+        cliff_ratio = _SCORE_DROP_RATIO  # 0.5
+
+        relevant_results: list[SearchResult] = []
+        prev_score = top_score
+
+        for result in results:
+            ratio_vs_top = result.score / top_score
+            ratio_vs_prev = result.score / prev_score if prev_score > 0 else 0.0
+
+            # Floor: below minimum relevance relative to the best result
+            if ratio_vs_top < relevance_floor and len(relevant_results) >= 1:
+                break
+
+            # Cliff: sudden drop compared to the previous result
+            if ratio_vs_prev < cliff_ratio and len(relevant_results) >= 1:
+                break
+
+            relevant_results.append(result)
+            prev_score = result.score
+
+        # --- Assemble output, respecting token ceiling and per-file cap ---
         selected = []
         tokens_used = 0
         file_chunk_counts: dict[str, int] = {}
 
-        for result in results:
-            # Enforce per-file diversity cap
-            fp = result.file_path
-            if file_chunk_counts.get(fp, 0) >= MAX_CHUNKS_PER_FILE:
+        for result in relevant_results:
+            file_path = result.file_path
+            if file_chunk_counts.get(file_path, 0) >= max_chunks_per_file:
                 continue
 
-            chunk_tokens = (result.chunk.token_count or 0) + HEADER_OVERHEAD
+            chunk_tokens = (result.chunk.token_count or 0) + header_overhead
 
+            # Token ceiling: hard stop, no truncation
             if tokens_used + chunk_tokens > token_budget:
-                remaining = token_budget - tokens_used - HEADER_OVERHEAD
-                if remaining > 100:
-                    content = result.content
-                    total_chars = len(content)
-                    total_toks = result.chunk.token_count or 1
-                    chars_per_tok = total_chars / total_toks
-                    target_chars = int(remaining * chars_per_tok)
-
-                    truncated = content[:target_chars]
-                    last_nl = truncated.rfind("\n")
-                    if last_nl > 0:
-                        truncated = truncated[:last_nl]
-
-                    if truncated.strip():
-                        est_tokens = int(len(truncated) / chars_per_tok) + HEADER_OVERHEAD
-                        selected.append({
-                            "file": result.file_path,
-                            "project": result.project_name,
-                            "name": result.chunk.name,
-                            "kind": result.chunk.kind,
-                            "lines": f"{result.chunk.start_line}-{result.chunk.end_line}",
-                            "content": truncated,
-                            "truncated": True,
-                            "tokens": est_tokens,
-                        })
-                        tokens_used += est_tokens
-                        file_chunk_counts[fp] = file_chunk_counts.get(fp, 0) + 1
                 break
 
             selected.append({
@@ -398,7 +685,7 @@ class HybridSearcher:
                 "tokens": chunk_tokens,
             })
             tokens_used += chunk_tokens
-            file_chunk_counts[fp] = file_chunk_counts.get(fp, 0) + 1
+            file_chunk_counts[file_path] = file_chunk_counts.get(file_path, 0) + 1
 
         return {
             "query": query,

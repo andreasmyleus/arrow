@@ -212,6 +212,53 @@ class TestStorage:
         assert len(syms) == 1
         assert syms[0].name == "foo"
 
+    def test_search_symbols_exact_match_priority(self, db):
+        """Exact matches should sort before prefix matches."""
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc", "python", project_id=pid)
+        # Create "search" (exact) and "search_code" (prefix)
+        cid1 = db.insert_chunk(
+            fid, "search", "function", 1, 3,
+            b"x", "def search(): pass", "test.py::search",
+            5, project_id=pid,
+        )
+        cid2 = db.insert_chunk(
+            fid, "search_code", "function", 5, 10,
+            b"y", "def search_code(): pass", "test.py::search_code",
+            8, project_id=pid,
+        )
+        db.insert_symbol(cid1, "search", "function", fid)
+        db.insert_symbol(cid2, "search_code", "function", fid)
+        db.commit()
+
+        syms = db.search_symbols("search")
+        assert len(syms) == 2
+        # Exact match "search" must come first
+        assert syms[0].name == "search"
+        assert syms[1].name == "search_code"
+
+    def test_search_symbols_kind_filter(self, db):
+        """Kind filter should work with exact-match ordering."""
+        pid = db.create_project("test-project", root_path="/tmp/test")
+        fid = db.upsert_file("test.py", "abc", "python", project_id=pid)
+        cid1 = db.insert_chunk(
+            fid, "run", "function", 1, 3,
+            b"x", "def run(): pass", "test.py::run",
+            5, project_id=pid,
+        )
+        cid2 = db.insert_chunk(
+            fid, "run", "method", 5, 10,
+            b"y", "def run(self): pass", "cls::run",
+            8, project_id=pid,
+        )
+        db.insert_symbol(cid1, "run", "function", fid)
+        db.insert_symbol(cid2, "run", "method", fid)
+        db.commit()
+
+        syms = db.search_symbols("run", kind="function")
+        assert len(syms) == 1
+        assert syms[0].kind == "function"
+
     def test_project_crud(self, db):
         pid = db.create_project(
             "org/repo", root_path="/tmp/repo",
