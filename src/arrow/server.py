@@ -460,12 +460,12 @@ def project_summary(project: str | None = None) -> str:
 
 
 @mcp.tool()
-def search_code(query: str, limit: int = 10, project: str | None = None) -> str:
+def search_code(query: str, limit: int = 5, project: str | None = None) -> str:
     """Hybrid search the indexed codebase using BM25 + semantic vector search.
 
     Args:
         query: Search query (keywords, function names, natural language).
-        limit: Maximum number of results to return (default 10).
+        limit: Maximum number of results to return (default 5).
         project: Optional project name to scope search (e.g. "org/repo").
                  Omit to search across all projects.
 
