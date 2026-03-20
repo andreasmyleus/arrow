@@ -15,6 +15,12 @@ For each use case, run two rounds on `/Users/andreas/arrow`:
 - Note cases where Arrow returns irrelevant context
 - For Arrow round, use ONLY the designated tool(s) — don't supplement with Glob/Read
 
+### Agent execution notes (learned from runs 1-4)
+
+- **Do NOT run both rounds in background agents.** MCP tool calls from background agents suffer from concurrency issues (`_ensure_indexed` SQLite contention) and permission denials (`search_regex` blocked). Instead, run both rounds **sequentially in the main session**, or run Traditional in a background agent and Arrow in the main session.
+- **Force re-index BEFORE starting**, then do NOT re-index during the run. The `_ensure_indexed` auto-refresh causes issues under concurrent load.
+- **For `search_regex` queries**, ensure the tool is pre-approved in permissions before the run (call it once manually first).
+
 ---
 
 ## Reports
