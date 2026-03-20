@@ -26,8 +26,8 @@ AI coding agents read entire files to gather context. On a moderately sized code
 Arrow pre-indexes your code into semantic chunks (functions, classes, methods) using tree-sitter, then serves exactly the relevant pieces in **1-4ms** using **96% fewer tokens**.
 
 ```
-Before:  "Review Docker setup"  →  970,799 tokens / 12.6s
-After:   "Review Docker setup"  →    3,961 tokens / 0ms
+Before:  "Review Docker setup"  →  119,401 tokens  (read all 59 files)
+After:   "Review Docker setup"  →    8,611 tokens  (Arrow, 50 relevant chunks)
 ```
 
 ---
