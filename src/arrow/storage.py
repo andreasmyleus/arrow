@@ -1419,13 +1419,26 @@ class Storage:
                    WHERE s.kind IN ('function', 'method')"""
             ).fetchall()
 
+        # Well-known framework callback patterns (called implicitly, not by name)
+        _framework_prefixes = ("on_", "handle_")
+        _framework_names = frozenset({
+            "setup", "teardown", "main",
+            "setUp", "tearDown", "setUpClass", "tearDownClass",
+            "clean_server_state",  # pytest autouse fixture
+        })
+
         dead = []
         for sym in symbols:
             name = sym["name"]
-            # Skip private/dunder/test/main
+            path = sym["path"]
+            # Skip private/dunder/test
             if (name.startswith("_")
                     or name.startswith("test")
-                    or name in ("main", "setup", "teardown")):
+                    or name in _framework_names
+                    or any(name.startswith(p) for p in _framework_prefixes)):
+                continue
+            # Skip pytest fixtures (conftest.py definitions)
+            if "conftest" in path:
                 continue
 
             # Check if any other chunk in source code references this name

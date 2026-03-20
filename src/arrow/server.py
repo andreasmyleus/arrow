@@ -57,6 +57,9 @@ _session_id: str = str(uuid.uuid4())
 
 _PROJECT_NOT_FOUND = -1  # Sentinel for project name given but not found
 
+# Guard for _ensure_indexed: only one re-index runs at a time
+_reindex_lock = threading.Lock()
+
 
 def _get_storage() -> Storage:
     global _storage
@@ -254,24 +257,30 @@ def _ensure_indexed() -> str | None:
     - If local projects exist: do an incremental re-index so edits made
       by the agent since the last tool call are picked up automatically.
       The indexer skips unchanged files (hash check), so this is fast.
+    - Concurrent-safe: only one re-index runs at a time; others skip.
     """
     storage = _get_storage()
     projects = storage.list_projects()
 
     if projects:
-        # Refresh local projects incrementally
-        indexer = _get_indexer()
-        for proj in projects:
-            if proj.root_path and not proj.is_remote:
-                root = Path(proj.root_path)
-                if root.is_dir():
-                    try:
-                        indexer.index_codebase(root)
-                    except Exception:
-                        logger.debug(
-                            "Incremental refresh failed for %s",
-                            proj.name,
-                        )
+        # Non-blocking lock: skip if another re-index is already in progress
+        if not _reindex_lock.acquire(blocking=False):
+            return None
+        try:
+            indexer = _get_indexer()
+            for proj in projects:
+                if proj.root_path and not proj.is_remote:
+                    root = Path(proj.root_path)
+                    if root.is_dir():
+                        try:
+                            indexer.index_codebase(root)
+                        except Exception:
+                            logger.debug(
+                                "Incremental refresh failed for %s",
+                                proj.name,
+                            )
+        finally:
+            _reindex_lock.release()
         return None
 
     cwd = Path.cwd()

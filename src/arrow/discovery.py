@@ -101,9 +101,11 @@ def _should_ignore(
     ignore_patterns: list[str],
 ) -> bool:
     """Check if a file/dir should be ignored."""
-    # Check default ignores
+    # Check default ignores (match against name, and rel_path for patterns with /)
     for pattern in DEFAULT_IGNORE:
         if fnmatch.fnmatch(name, pattern):
+            return True
+        if "/" in pattern and fnmatch.fnmatch(rel_path, pattern):
             return True
 
     # Check gitignore patterns
