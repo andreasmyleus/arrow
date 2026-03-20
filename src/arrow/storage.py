@@ -840,6 +840,29 @@ class Storage:
         rows = self.conn.execute(query, params_with_order).fetchall()
         return [SymbolRecord(**dict(r)) for r in rows]
 
+    def enumerate_symbols_by_kind(
+        self, kind: str, limit: int = 100,
+        project_id: Optional[int] = None,
+    ) -> list[SymbolRecord]:
+        """Return all symbols of a given kind, ordered by name."""
+        conditions = ["s.kind = ?"]
+        params: list = [kind]
+
+        if project_id is not None:
+            conditions.append("f.project_id = ?")
+            params.append(project_id)
+
+        where = " AND ".join(conditions)
+        params.append(limit)
+
+        query = f"""SELECT s.* FROM symbols s
+                   JOIN files f ON f.id = s.file_id
+                   WHERE {where}
+                   ORDER BY s.name LIMIT ?"""
+
+        rows = self.conn.execute(query, params).fetchall()
+        return [SymbolRecord(**dict(r)) for r in rows]
+
     # -- Project metadata (legacy compat) --
 
     def set_project_meta(self, key: str, value: str) -> None:
