@@ -142,11 +142,11 @@ The main tool. Natural language query → relevant code chunks with auto token b
 
 | # | Query | Arrow tool(s) | Report slug | What it tests |
 |---|-------|---------------|-------------|---------------|
-| 1 | "Review the Docker setup — how is it configured, what does it build, and how would I run it?" | `get_context` | `01-docker-setup` | Targeted lookup — files are trivially named |
-| 2 | "What does the CI pipeline do?" | `get_context` | `02-ci-pipeline` | Single well-known file |
+| 1 | "How does the indexer decide which files to re-index vs skip on incremental updates?" | `get_context` | `01-incremental-indexing` | Targeted — answer spans indexer.py + storage.py, pure Python |
+| 2 | "How does the chunker handle nested classes and inner functions?" | `get_context` | `02-chunker-nesting` | Targeted — answer is in chunker.py, tests AST-level code retrieval |
 | 3 | "How does the hybrid search work end-to-end? Walk me through a query from `get_context()` to returned chunks." | `get_context` | `03-hybrid-search-e2e` | Broad — spans server.py → search.py → storage.py → vector_store.py |
 | 4 | "Review error handling patterns across the codebase — where are errors caught, logged, or swallowed?" | `get_context` | `04-error-handling` | Very broad — requires reading every source file |
-| 5 | "How is configuration managed — env vars, defaults, CLI flags?" | `get_context` | `05-configuration` | Cross-cutting — touches config.py, cli.py, server.py, Dockerfile |
+| 5 | "How is configuration managed — env vars, defaults, CLI flags?" | `get_context` | `05-configuration` | Cross-cutting — touches config.py, cli.py, server.py |
 | 6 | "How does Arrow handle multiple projects — indexing, searching, and isolation?" | `get_context` | `06-multi-project` | Cross-cutting — spans 4+ files |
 
 ### Category 2: `search_code` — Hybrid search
@@ -164,7 +164,7 @@ Regex search against indexed chunks. Competes directly with Grep.
 
 | # | Query | Arrow tool(s) | Report slug | What it tests |
 |---|-------|---------------|-------------|---------------|
-| 9 | "Find all places where exceptions are caught and logged" | `search_regex` pattern: `except.*:.*log` | `09-exception-logging` | Regex across codebase — direct Grep competitor |
+| 9 | "Find all places where exceptions are caught and logged" | `search_regex` pattern: `except.*:[\s\S]*?log` (multiline) | `09-exception-logging` | Multiline regex — except and log often on different lines |
 | 10 | "Find all environment variable reads" | `search_regex` pattern: `os\.environ\|getenv\|ARROW_` | `10-env-var-reads` | Multi-pattern regex search |
 
 ### Category 4: `search_structure` — AST symbol lookup
@@ -210,7 +210,9 @@ Shows changed functions + all callers/dependents. Requires uncommitted changes.
 
 | # | Query | Arrow tool(s) | Report slug | What it tests |
 |---|-------|---------------|-------------|---------------|
-| 20 | "What functions changed in search.py and who calls them?" | `get_diff_context` | `20-search-diff` | Changed code + caller analysis (run with uncommitted changes to search.py) |
+| 20 | "What functions changed in search.py and who calls them?" | `get_diff_context` | `20-search-diff` | Changed code + caller analysis |
+
+**Setup required:** Before running Q20, make a trivial uncommitted change to `search.py` (e.g., add a comment). Revert after the query.
 
 ### Category 9: `resolve_symbol` — Cross-repo symbol resolution
 
@@ -253,16 +255,16 @@ The answer is in a small, specific place but you don't know where.
 | # | Query | Arrow tool(s) | Report slug | What makes it hard |
 |---|-------|---------------|-------------|-------------------|
 | 27 | "Where and how is the embedding model downloaded, and what model is it?" | `get_context` | `27-embedding-model` | Could be in embedder.py, config.py, Dockerfile, or cli.py |
-| 28 | "How does the healthcheck work in Docker?" | `get_context` | `28-docker-healthcheck` | 1 line in Dockerfile, easy to miss with broad reads |
+| 28 | "How does Arrow detect and skip binary files during indexing?" | `get_context` | `28-binary-detection` | Answer buried in discovery.py or indexer.py, non-obvious location |
 | 29 | "What hash algorithm is used for content dedup and why?" | `get_context` | `29-hash-algorithm` | Buried in hasher.py, referenced elsewhere |
 
-### Category 14: Documentation (tests both)
+### Category 14: Token budgeting (tests `get_context` smart retrieval)
 
-The answer is literally in markdown files.
+The answer requires understanding how Arrow decides what to return.
 
 | # | Query | Arrow tool(s) | Report slug | What it tests |
 |---|-------|---------------|-------------|---------------|
-| 30 | "What MCP tools does Arrow expose and what does each do?" | `get_context` | `30-mcp-tools` | README has the full table — traditional just reads README |
+| 30 | "How does `get_context` decide how many tokens to return and which chunks to pick?" | `get_context` | `30-token-budgeting` | Answer spans search.py + server.py — tests self-referential retrieval |
 
 ---
 
@@ -302,25 +304,26 @@ For each use case, record:
 
 ---
 
-## Expected Outcomes
+## Expected Outcomes (updated after 4 runs)
 
-| Category | Arrow tool | Expected Winner | Why |
-|----------|-----------|----------------|-----|
-| `get_context` targeted | `get_context` | Traditional | Glob finds known files instantly |
-| `get_context` broad | `get_context` | Arrow | Traditional needs 5-15 Read calls across large files |
-| `get_context` needle | `get_context` | Depends | Arrow if it chunks well, traditional if grep finds it |
-| `get_context` docs | `get_context` | Traditional | Just read the README |
-| `search_code` | `search_code` | Arrow | Hybrid search returns ranked relevant results |
-| `search_regex` | `search_regex` | Close | Direct Grep competitor — Arrow adds structure, Grep is raw |
-| `search_structure` | `search_structure` | Arrow | AST index vs noisy grep for `def search` |
-| `what_breaks_if_i_change` | `what_breaks_if_i_change` | Arrow | No traditional equivalent without reading everything |
-| `trace_dependencies` | `trace_dependencies` | Arrow | Manual grep for imports is tedious and error-prone |
-| `get_tests_for` | `get_tests_for` | Arrow | Name-based grep misses indirect references |
-| `get_diff_context` | `get_diff_context` | Arrow | Traditional needs git diff + manual caller tracing |
-| `resolve_symbol` | `resolve_symbol` | Arrow | Cross-repo grep is impractical |
-| `file_summary` | `file_summary` | Arrow | Structured overview vs reading 500+ line file |
-| `project_summary` | `project_summary` | Arrow | Instant overview vs Glob + count + Read multiple files |
-| `find_dead_code` | `find_dead_code` | Arrow | No practical traditional equivalent |
+| Category | Arrow tool | Expected Winner | Actual (run 4) | Why |
+|----------|-----------|----------------|----------------|-----|
+| `get_context` targeted (Q1-2) | `get_context` | Arrow | *Not yet tested (queries replaced)* | New queries target Python code where chunking should help |
+| `get_context` broad (Q3-4) | `get_context` | Arrow | *0/2 — concurrency bug* | Should win once concurrency fix is verified |
+| `get_context` cross-cutting (Q5-6) | `get_context` | Arrow | *0/2 — concurrency bug* | Requires multi-file retrieval — Arrow's sweet spot |
+| `get_context` needle (Q27-29) | `get_context` | Depends | *0/3 — concurrency bug* | Arrow if chunks are relevant; grep if keyword is obvious |
+| `get_context` token budgeting (Q30) | `get_context` | Arrow | *Not yet tested (query replaced)* | Self-referential query — Arrow should retrieve its own code well |
+| `search_code` (Q7-8) | `search_code` | Tie/Arrow | 0W 1L 1T | Competitive — Q8 tied at quality 5, Q7 hurt by index pollution |
+| `search_regex` (Q9-10) | `search_regex` | Close | *Untested — permission bug* | Direct Grep competitor — Arrow adds chunk context |
+| `search_structure` (Q11-13) | `search_structure` | **Arrow** | **2W 1L** | AST-precise lookup dominates; common names can over-return |
+| `what_breaks_if_i_change` (Q14-15) | `what_breaks_if_i_change` | **Arrow** | **2W 0L** | No traditional equivalent — always use Arrow |
+| `trace_dependencies` (Q16-17) | `trace_dependencies` | **Arrow** | **1W 0L 1T** | Full import graph in one call — always use Arrow |
+| `get_tests_for` (Q18-19) | `get_tests_for` | Arrow | **1W 1L** | Excellent for specific functions; broad queries truncate |
+| `get_diff_context` (Q20) | `get_diff_context` | **Arrow** | **1W 0L** | Changed functions + callers in one call |
+| `resolve_symbol` (Q21-22) | `resolve_symbol` | **Arrow** | **2W 0L** | Cross-repo lookup — always use Arrow |
+| `file_summary` (Q23-24) | `file_summary` | **Arrow** | **2W 0L** | Structured JSON overview — always use Arrow |
+| `project_summary` (Q25) | `project_summary` | Traditional | **0W 1L** | File count misleading (counts .md); needs LOC metric |
+| `find_dead_code` (Q26) | `find_dead_code` | **Arrow** | **1W 0L** | 6.7x faster, better recall; some framework false positives |
 
 ---
 
