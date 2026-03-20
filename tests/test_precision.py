@@ -81,17 +81,17 @@ class TestFilterByRelevance:
     def test_keeps_high_scoring_results(self):
         """All results above the min_score_ratio threshold are kept."""
         scored = [(1, 1.0), (2, 0.9), (3, 0.8), (4, 0.7), (5, 0.5)]
-        filtered = filter_by_relevance(scored, min_score_ratio=0.4)
-        assert len(filtered) == 5  # 0.5/1.0 = 0.5 > 0.4
+        filtered = filter_by_relevance(scored, min_score_ratio=0.25)
+        assert len(filtered) == 5  # 0.5/1.0 = 0.5 > 0.25
 
     def test_drops_low_scoring_tail(self):
         """Results below the min_score_ratio threshold are removed."""
-        scored = [(1, 1.0), (2, 0.8), (3, 0.3), (4, 0.2), (5, 0.1)]
-        filtered = filter_by_relevance(scored, min_score_ratio=0.4)
+        scored = [(1, 1.0), (2, 0.8), (3, 0.2), (4, 0.1), (5, 0.05)]
+        filtered = filter_by_relevance(scored, min_score_ratio=0.25, floor=1)
         ids = [cid for cid, _ in filtered]
         assert 1 in ids
         assert 2 in ids
-        assert 3 not in ids  # 0.3/1.0 = 0.3 < 0.4
+        assert 3 not in ids  # 0.2/1.0 = 0.2 < 0.25
         assert 4 not in ids
         assert 5 not in ids
 
@@ -100,7 +100,7 @@ class TestFilterByRelevance:
         # Scores: 1.0, 0.9, 0.85, 0.3, 0.28 — big gap between 0.85 and 0.3
         scored = [(1, 1.0), (2, 0.9), (3, 0.85), (4, 0.3), (5, 0.28)]
         filtered = filter_by_relevance(
-            scored, min_score_ratio=0.2, drop_ratio=0.5
+            scored, min_score_ratio=0.2, drop_ratio=0.4, floor=1
         )
         ids = [cid for cid, _ in filtered]
         assert len(filtered) == 3  # cut at the 0.85 -> 0.3 cliff
@@ -130,11 +130,11 @@ class TestFilterByRelevance:
         # Each score is 90% of the previous — no cliff
         scored = [(i, 1.0 * (0.9 ** i)) for i in range(10)]
         filtered = filter_by_relevance(
-            scored, min_score_ratio=0.3, drop_ratio=0.5
+            scored, min_score_ratio=0.25, drop_ratio=0.4
         )
         # 0.9^0 = 1.0, 0.9^5 = 0.59, 0.9^10 = 0.35
-        # min_score_ratio=0.3 would keep up to ~0.9^11=0.31
-        # drop_ratio=0.5 never triggers (each step is 0.9x previous)
+        # min_score_ratio=0.25 would keep up to ~0.9^13=0.25
+        # drop_ratio=0.4 never triggers (each step is 0.9x previous)
         assert len(filtered) >= 8
 
     def test_zero_scores_handled(self):
@@ -180,7 +180,7 @@ class TestSearchPrecision:
             # All returned results should have a reasonable score ratio
             for r in results:
                 ratio = r.score / top_score if top_score > 0 else 1.0
-                assert ratio >= 0.3, (
+                assert ratio >= 0.2, (
                     f"Result {r.file_path}:{r.chunk.name} has score ratio "
                     f"{ratio:.2f} which is below the expected floor"
                 )
@@ -211,14 +211,14 @@ class TestFilterByRelevanceEdgeCases:
     def test_all_below_threshold(self):
         """When all but the first are below threshold, only floor kept."""
         scored = [(1, 1.0), (2, 0.1), (3, 0.05)]
-        filtered = filter_by_relevance(scored, min_score_ratio=0.4, floor=1)
+        filtered = filter_by_relevance(scored, min_score_ratio=0.25, floor=1)
         assert len(filtered) == 1
 
     def test_two_result_cliff(self):
         """Cliff detection with only two results."""
         scored = [(1, 1.0), (2, 0.2)]
         filtered = filter_by_relevance(
-            scored, min_score_ratio=0.4, drop_ratio=0.5, floor=1
+            scored, min_score_ratio=0.25, drop_ratio=0.4, floor=1
         )
         assert len(filtered) == 1
 
@@ -244,6 +244,6 @@ class TestFilterByRelevanceEdgeCases:
 
         # Item 1 is in both lists, items 2-5 are in only one
         # This creates a natural score cliff
-        filtered = filter_by_relevance(fused, drop_ratio=0.5)
+        filtered = filter_by_relevance(fused, drop_ratio=0.4)
         ids = [cid for cid, _ in filtered]
         assert 1 in ids  # in both lists, highest score

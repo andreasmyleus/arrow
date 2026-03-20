@@ -18,7 +18,7 @@ from .vector_store import VectorStore
 logger = logging.getLogger(__name__)
 
 # Non-code languages get a score penalty so they don't dominate search results
-_NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
+_NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml", "dockerfile"}
 
 # Query terms that signal the user wants config/non-code files
 _CONFIG_QUERY_TERMS = {
@@ -27,6 +27,10 @@ _CONFIG_QUERY_TERMS = {
     "readme", "markdown", "md", "cargo", "makefile",
     "healthcheck", "compose", "requirements", "setup",
     "dependencies", "devcontainer",
+    "ci", "cd", "pipeline", "workflow", "workflows", "actions",
+    "github", "gitlab", "jenkins", "build", "deploy", "deployment",
+    "nginx", "helm", "kubernetes", "k8s", "terraform",
+    "env", "environment", "settings", "manifest",
 }
 
 _TEST_PATH_MARKERS = ("test_", "_test.", "tests/", "__tests__/", "spec/", "/test/")
@@ -66,12 +70,12 @@ def _is_doc_path(path_lower: str) -> bool:
 
 # --- Precision filtering constants ---
 # Results scoring below this fraction of the top result's score are dropped.
-_MIN_SCORE_RATIO = 0.4
+_MIN_SCORE_RATIO = 0.25
 # If a result's score drops by more than this factor vs the previous result,
 # treat it as a relevance cliff and stop including results beyond that point.
-_SCORE_DROP_RATIO = 0.5
-# Never cut below this many results (protects very small result sets).
-_MIN_RESULTS_FLOOR = 1
+_SCORE_DROP_RATIO = 0.4
+# Never cut below this many results — zero results is never useful.
+_MIN_RESULTS_FLOOR = 5
 
 # Words to ignore when matching query terms against file names
 _STOP_WORDS = frozenset({
@@ -92,13 +96,20 @@ _STOP_WORDS = frozenset({
 def _extract_query_concepts(query: str) -> list[str]:
     """Extract meaningful concept terms from a query, filtering stop words.
 
-    Returns lowercase terms of 3+ characters that aren't stop words.
+    Returns lowercase terms of 2+ characters that aren't stop words.
+    Short terms (2 chars) are only kept if they appear in _CONFIG_QUERY_TERMS
+    or _SINGLE_CONCEPT_WORDS (e.g. "ci", "cd", "k8s").
     Also splits snake_case tokens into sub-terms.
     """
     raw_tokens = _re.split(r'[^a-zA-Z0-9_]+', query.lower())
     concepts = []
     for token in raw_tokens:
-        if len(token) < 3 or token in _STOP_WORDS:
+        if not token or token in _STOP_WORDS:
+            continue
+        if len(token) < 3:
+            # Keep short tokens only if they're known config/concept terms
+            if token in _CONFIG_QUERY_TERMS or token in _SINGLE_CONCEPT_WORDS:
+                concepts.append(token)
             continue
         concepts.append(token)
         # Also add sub-parts of snake_case tokens
@@ -110,12 +121,13 @@ def _extract_query_concepts(query: str) -> list[str]:
 
 
 def _filename_match_boost(path: str, concepts: list[str]) -> float:
-    """Score how well a file name matches query concepts.
+    """Score how well a file path matches query concepts.
 
     Returns a boost multiplier:
     - 1.0 = no match
     - 2.0 = file stem matches a concept exactly (e.g. query "frecency" -> frecency.py)
     - 1.5 = file stem contains a concept (e.g. query "vector" -> vector_store.py)
+    - 1.3 = a path component matches a concept (e.g. query "workflows" -> .github/workflows/ci.yml)
     """
     if not concepts:
         return 1.0
@@ -130,6 +142,12 @@ def _filename_match_boost(path: str, concepts: list[str]) -> float:
     for concept in concepts:
         if concept in stem:
             return 1.5
+
+    # Path component match: "workflows" -> .github/workflows/ci.yml
+    path_lower = path.lower()
+    for concept in concepts:
+        if concept in path_lower:
+            return 1.3
 
     return 1.0
 
@@ -715,17 +733,22 @@ class HybridSearcher:
         # RRF scores.  Here we apply a second pass on materialised results
         # to catch anything that slipped through (e.g. after frecency boost
         # or penalty adjustments changed the ordering).
+        #
+        # Minimum guarantee: always keep at least _MIN_RESULTS_FLOOR results
+        # so the caller never gets zero chunks when candidates exist.
 
         top_score = results[0].score
         if top_score <= 0:
             top_score = 1.0
 
-        # 1) Absolute relevance floor: drop anything < 40% of top score
-        relevance_floor = _MIN_SCORE_RATIO  # 0.4
+        # 1) Absolute relevance floor: drop anything < 25% of top score
+        relevance_floor = _MIN_SCORE_RATIO  # 0.25
 
         # 2) Score cliff detection: stop when a result's score drops to
-        #    < 50% of the *previous* result's score (big gap = irrelevant tail)
-        cliff_ratio = _SCORE_DROP_RATIO  # 0.5
+        #    < 40% of the *previous* result's score (big gap = irrelevant tail)
+        cliff_ratio = _SCORE_DROP_RATIO  # 0.4
+
+        min_keep = min(_MIN_RESULTS_FLOOR, len(results))
 
         relevant_results: list[SearchResult] = []
         prev_score = top_score
@@ -735,11 +758,11 @@ class HybridSearcher:
             ratio_vs_prev = result.score / prev_score if prev_score > 0 else 0.0
 
             # Floor: below minimum relevance relative to the best result
-            if ratio_vs_top < relevance_floor and len(relevant_results) >= 1:
+            if ratio_vs_top < relevance_floor and len(relevant_results) >= min_keep:
                 break
 
             # Cliff: sudden drop compared to the previous result
-            if ratio_vs_prev < cliff_ratio and len(relevant_results) >= 1:
+            if ratio_vs_prev < cliff_ratio and len(relevant_results) >= min_keep:
                 break
 
             relevant_results.append(result)
