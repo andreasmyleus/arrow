@@ -8,27 +8,29 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-197%20passing-brightgreen.svg)](#running-tests)
-[![MCP Tools](https://img.shields.io/badge/MCP%20tools-28-purple.svg)](#available-mcp-tools-28)
+[![Tests](https://img.shields.io/badge/tests-195%20passing-brightgreen.svg)](#development)
+[![MCP Tools](https://img.shields.io/badge/MCP%20tools-28-purple.svg)](#mcp-tools-28)
 
 ```
-15x fewer tokens   |   sub-1ms queries   |   64+ languages   |   28 MCP tools
+15x fewer tokens   |   sub-1ms queries   |   49 languages   |   28 MCP tools
 ```
 
 </div>
 
 ---
 
-## The Problem
+## Why Arrow?
 
 AI coding agents read entire files to gather context. On a moderately sized codebase, a single question can consume **1M+ tokens** and take **13+ seconds**.
 
-**Arrow fixes this.** It pre-indexes your code into semantic chunks (functions, classes, methods), then serves exactly the relevant pieces in **1-4ms** using **96% fewer tokens**.
+Arrow pre-indexes your code into semantic chunks (functions, classes, methods) using tree-sitter, then serves exactly the relevant pieces in **1-4ms** using **96% fewer tokens**.
 
 ```
 Before:  "Review Docker setup"  →  970,799 tokens / 12.6s
 After:   "Review Docker setup"  →    3,961 tokens / 0ms
 ```
+
+---
 
 ## Quick Start
 
@@ -43,12 +45,19 @@ pip install -e .
 
 ### 2. Register with your agent
 
-**Claude Code:**
+**Claude Code (stdio):**
 ```bash
 claude mcp add --transport stdio arrow -- /path/to/arrow/.venv/bin/python -m arrow serve
 ```
 
-**Other MCP agents:** Point your agent's MCP config at the same command, or use HTTP transport (see [Docker](#docker)).
+**Docker (HTTP):**
+```bash
+docker build -t arrow .
+docker run -v /path/to/project:/workspace:ro -p 8080:8080 arrow
+claude mcp add --transport http arrow http://localhost:8080/mcp
+```
+
+**Other MCP agents:** Point your agent's MCP config at the same stdio command or HTTP endpoint.
 
 ### 3. Index your project
 
@@ -56,11 +65,11 @@ claude mcp add --transport stdio arrow -- /path/to/arrow/.venv/bin/python -m arr
 arrow index /path/to/project
 ```
 
-Or just ask your agent: *"Index my codebase at /path/to/project"*
+Or ask your agent: *"Index my codebase at /path/to/project"*
 
 ### 4. Add to your agent instructions (recommended)
 
-Add something like this to your `CLAUDE.md`, system prompt, or agent config:
+Add to your `CLAUDE.md`, system prompt, or agent config:
 
 ```markdown
 ## Code Context
@@ -75,14 +84,12 @@ Use these MCP tools BEFORE reading files manually:
 - `index_github_repo(owner, repo)` — clone + index a remote repo
 ```
 
-That's it. Your agent will now use Arrow automatically for code lookups.
-
 ---
 
 ## Features
 
 ### Search & Retrieval
-- **AST-based chunking** — tree-sitter parses 64+ languages into semantic units (functions, classes, methods)
+- **AST-based chunking** — tree-sitter parses 49 languages into semantic units (functions, classes, methods)
 - **Hybrid search** — BM25 full-text + semantic vector search with reciprocal rank fusion
 - **Smart token budgeting** — auto-estimates optimal budget from query complexity
 - **Frecency boost** — recently/frequently accessed files rank higher
@@ -105,7 +112,6 @@ That's it. Your agent will now use Arrow automatically for code lookups.
 
 ### Session & Memory
 - **Conversation-aware** — tracks which chunks have been sent, never re-sends duplicates
-- **Auto-compaction** — compacts to signatures at 256k tokens
 - **Long-term memory** — persistent key-value store with FTS, survives across sessions
 - **Index export/import** — share indexes across machines or CI
 - **Concurrent-safe** — SQLite WAL + per-project write locks
@@ -114,7 +120,8 @@ That's it. Your agent will now use Arrow automatically for code lookups.
 
 ## Performance
 
-### Micro-benchmarks
+<details>
+<summary><b>Micro-benchmarks</b></summary>
 
 | Operation | Speed | Details |
 |-----------|-------|---------|
@@ -127,17 +134,21 @@ That's it. Your agent will now use Arrow automatically for code lookups.
 | get_context | 0.8-0.95ms | search + rank + token trim |
 | Budget fill rate | 82-99% | Fills budget efficiently |
 
+</details>
+
 ### Arrow vs Traditional (Read Entire Files)
 
-110 queries across 10 complexity tiers. Arrow uses `get_context` with a 4000-token budget. Traditional simulates reading entire files. Benchmarked on Arrow's own codebase (14 files, 219 chunks).
+110 queries across 10 complexity tiers on Arrow's own codebase. Arrow uses `get_context` with a 4000-token budget. Traditional simulates reading entire files.
 
 ```
 Token efficiency:  15.2x (Arrow uses 1/15th the tokens)
 Overall savings:   93.4%
-Median savings:    91.5%
 Arrow p50 latency: 0.95ms
 Arrow p99 latency: 1.99ms
 ```
+
+<details>
+<summary><b>Full breakdown by query type</b></summary>
 
 | Complexity Tier | Queries | Arrow Tokens | Traditional Tokens | Savings |
 |-----------------|---------|-------------|-------------------|---------|
@@ -155,42 +166,19 @@ Arrow p99 latency: 1.99ms
 
 Total benchmark time: **92ms** (0.8ms avg per query).
 
-<details>
-<summary><b>Index statistics</b></summary>
-
-```
-Files:       14
-Chunks:      219
-Symbols:     216
-Imports:     261
-Chunks/file: 15.6 avg
-Tokens:      47,730 total, 218 avg, 13-2085 range
-Languages:   python(14)
-Chunk kinds: function(203), class(14), module(2)
-```
-
 </details>
 
 ---
 
-## Available MCP Tools (28)
-
-### Indexing
-
-| Tool | Description |
-|------|-------------|
-| `index_codebase(path)` | Index/re-index a codebase (auto-detects git org/repo) |
-| `index_git_commit(path, ref)` | Index at a specific commit/tag/branch |
-| `index_pr(path, pr_number)` | Index both sides of a PR for review |
-| `index_github_content(owner, repo, branch, files)` | Cache remote GitHub content |
-| `index_github_repo(owner, repo, branch?, sparse_paths?)` | Clone + index a GitHub repo via `gh` CLI |
+## MCP Tools (28)
 
 ### Search & Context
 
 | Tool | Description |
 |------|-------------|
-| `get_context(query, token_budget?, project?)` | **Main tool.** Relevant code within a token budget. Auto-budgets, conversation-aware, auto-compacts at 256k. |
+| `get_context(query, token_budget?, project?)` | **Primary tool.** Relevant code within a token budget. Auto-budgets, conversation-aware. |
 | `search_code(query, project?)` | Hybrid BM25 + semantic search with frecency boost |
+| `search_regex(pattern, limit?, project?)` | Regex search against indexed chunks |
 | `search_structure(symbol, project?)` | Find definitions by name via AST index |
 | `resolve_symbol(symbol, project?)` | Cross-repo symbol resolution |
 
@@ -205,7 +193,17 @@ Chunk kinds: function(203), class(14), module(2)
 | `find_dead_code(project?)` | Functions/classes with zero callers |
 | `detect_stale_index(project?)` | Check if index is outdated vs working tree |
 
-### Project Management
+### Indexing
+
+| Tool | Description |
+|------|-------------|
+| `index_codebase(path)` | Index/re-index a codebase (auto-detects git org/repo) |
+| `index_git_commit(path, ref)` | Index at a specific commit/tag/branch |
+| `index_pr(path, pr_number)` | Index both sides of a PR for review |
+| `index_github_repo(owner, repo, branch?, sparse_paths?)` | Clone + index a GitHub repo via `gh` CLI |
+| `index_github_content(owner, repo, branch, files)` | Cache remote GitHub content |
+
+### Project & Session
 
 | Tool | Description |
 |------|-------------|
@@ -215,90 +213,14 @@ Chunk kinds: function(203), class(14), module(2)
 | `remove_project(project)` | Remove a project and all its data |
 | `export_index(project)` | Export index as JSON |
 | `import_index(json_bundle)` | Import index from JSON |
-
-### Session & Memory
-
-| Tool | Description |
-|------|-------------|
-| `context_pressure()` | Session token usage, pressure %, status |
-| `search_regex(pattern, limit?, project?)` | Regex search against indexed code |
+| `context_pressure()` | Session token usage and pressure status |
 | `store_memory(key, content, category?, project?)` | Persist knowledge across sessions |
 | `recall_memory(query, category?, project?, limit?)` | FTS search of stored memories |
 | `list_memories(category?, project?)` | List all memories |
 | `delete_memory(memory_id?, key?, category?, project?)` | Delete memories |
 | `tool_analytics(hours?)` | Call counts, latency, usage patterns |
 
-> All search/query tools accept an optional `project` parameter to scope results. Omit it to search across all indexed projects.
-
----
-
-## CLI Reference
-
-```
-arrow <command> [options]
-```
-
-<details>
-<summary><b>All commands</b></summary>
-
-| Command | Description |
-|---------|-------------|
-| `serve` | Start the MCP server (stdio or HTTP) |
-| `index` | Index a codebase (auto-detects org/repo from git) |
-| `search` | Search the indexed codebase |
-| `context` | Get relevant code within a token budget |
-| `status` | Show index status and stats |
-| `repos` | List all indexed projects |
-| `snapshot` | Index at a specific git commit/tag/branch |
-| `pr` | Index both sides of a pull request |
-| `symbols` | Search for symbols (functions, classes, etc.) |
-| `diff-context` | Show changed code + callers/dependents |
-| `impact` | What breaks if you change a file/function |
-| `tests-for` | Find tests for a function |
-| `remove` | Remove a project from the index |
-| `stale` | Detect stale/outdated indexes |
-| `deadcode` | Find unreferenced functions/classes |
-| `export` | Export a project index as JSON |
-| `import` | Import a project index from JSON |
-| `analytics` | Show MCP tool usage statistics |
-| `pressure` | Show context window pressure |
-| `compact` | Compact sent context to signatures |
-| `remember` | Store a long-term memory |
-| `recall` | Search long-term memories |
-| `forget` | Delete a memory |
-| `memories` | List all stored memories |
-
-</details>
-
-### Common Examples
-
-```bash
-# Index multiple repos
-arrow index /path/to/project
-arrow index /path/to/another/project
-
-# Search across all projects or scoped
-arrow search "database connection"
-arrow search "authentication" --project myorg/myrepo
-
-# Get context-window-friendly output
-arrow context "authentication flow" --budget 4000
-
-# Git history snapshots
-arrow snapshot /path/to/project v1.2.0
-arrow search "auth" --project "org/repo@v1.2.0"
-
-# PR review — index both sides
-arrow pr /path/to/project 123
-arrow search "auth" --project "org/repo@pr:PR-123"
-
-# Impact analysis
-arrow impact src/auth.py --function authenticate
-
-# Long-term memory
-arrow remember "auth-pattern" "Uses JWT with refresh rotation" --category architecture
-arrow recall "JWT tokens"
-```
+> All tools accept an optional `project` parameter to scope results. Omit it to search across all indexed projects.
 
 ---
 
@@ -309,11 +231,11 @@ arrow recall "JWT tokens"
 docker build -t arrow .
 docker run -v /path/to/project:/workspace:ro -p 8080:8080 arrow
 
-# Register with Claude Code (HTTP transport)
+# Register with Claude Code
 claude mcp add --transport http arrow http://localhost:8080/mcp
 ```
 
-Or with docker-compose:
+With docker-compose:
 
 ```bash
 WORKSPACE_PATH=/path/to/project docker compose up -d
@@ -330,9 +252,63 @@ docker buildx build --platform linux/amd64,linux/arm64 -t arrow:latest .
 
 ---
 
-## How It Works
+## CLI
 
-### Architecture
+```
+arrow <command> [options]
+```
+
+<details>
+<summary><b>All commands</b></summary>
+
+| Command | Description |
+|---------|-------------|
+| `serve` | Start the MCP server (stdio or HTTP) |
+| `index` | Index a codebase |
+| `search` | Search indexed code |
+| `context` | Get relevant code within a token budget |
+| `status` | Show index stats |
+| `repos` | List indexed projects |
+| `snapshot` | Index at a specific git ref |
+| `pr` | Index both sides of a PR |
+| `symbols` | Search for symbols |
+| `diff-context` | Changed code + callers/dependents |
+| `impact` | What breaks if you change a file/function |
+| `tests-for` | Find tests for a function |
+| `remove` | Remove a project |
+| `stale` | Detect stale indexes |
+| `deadcode` | Find unreferenced code |
+| `export` | Export index as JSON |
+| `import` | Import index from JSON |
+| `analytics` | Tool usage statistics |
+| `pressure` | Context window pressure |
+| `remember` | Store a memory |
+| `recall` | Search memories |
+| `forget` | Delete a memory |
+| `memories` | List all memories |
+
+</details>
+
+### Examples
+
+```bash
+# Index and search
+arrow index /path/to/project
+arrow search "database connection"
+arrow context "authentication flow" --budget 4000
+
+# Git snapshots and PR review
+arrow snapshot /path/to/project v1.2.0
+arrow pr /path/to/project 123
+
+# Analysis
+arrow impact src/auth.py --function authenticate
+arrow deadcode
+```
+
+---
+
+## Architecture
 
 ```
 AI Agent ──(JSON-RPC/stdio|HTTP)──> Arrow MCP Server
@@ -348,21 +324,13 @@ AI Agent ──(JSON-RPC/stdio|HTTP)──> Arrow MCP Server
                     (SQLite WAL)    (FTS5 k/v store)
 ```
 
-### Multi-Repo & Git
-
-Arrow tracks all repos in one shared database, organized by `org/repo` (auto-detected from git remote URLs).
-
-- **Auto-detection** — reads `git remote get-url origin` to determine identity
-- **Branch + commit tracking** — stores current branch and HEAD commit per project
-- **Per-project file watchers** — each project gets its own watchdog instance
-- **Concurrent safety** — SQLite WAL mode + per-project write locks
-
-### Tech Stack
+<details>
+<summary><b>Tech stack</b></summary>
 
 | Component | Library | Why |
 |-----------|---------|-----|
 | MCP SDK | `mcp` (Python) | Official SDK |
-| AST parsing | `tree-sitter` | 64+ languages, incremental |
+| AST parsing | `tree-sitter` | 49 languages, incremental |
 | Vector search | `usearch` | 20x faster than FAISS |
 | Embeddings | `onnxruntime` + Jina | CPU-only, no GPU needed |
 | Full-text search | SQLite FTS5 | BM25 scoring, zero deps |
@@ -372,23 +340,16 @@ Arrow tracks all repos in one shared database, organized by `org/repo` (auto-det
 | File watching | `watchdog` | Native OS APIs |
 | Database | SQLite (WAL mode) | 800+ writes/sec |
 
+</details>
+
 ---
 
 ## Development
 
-### Running Tests
-
 ```bash
 pip install -e ".[test]"
-pytest tests/ -v
-```
-
-197 tests across 20 test files.
-
-### Running Benchmarks
-
-```bash
-python benchmarks/bench.py /path/to/codebase
+pytest tests/ -v           # 195 tests across 22 files
+python benchmarks/bench.py # micro-benchmarks
 ```
 
 ---
@@ -399,8 +360,6 @@ python benchmarks/bench.py /path/to/codebase
 - **Custom chunk boundaries** — `// @arrow-chunk` comments for domain-specific splitting
 - **Monorepo workspace support** — `arrow.json` config for sub-projects
 - **Type-aware search** — search by type annotations and signatures
-- **Embedding model hot-swap** — swap models without re-indexing
-- **Persistent query cache** — sub-microsecond repeated queries
 - **Language server integration** — LSP hover/definition data for cross-file resolution
 
 ---
