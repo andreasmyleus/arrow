@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from .chunker import chunk_file
-from .git_utils import get_diff_hunks
+from .git_utils import _git_cmd, get_diff_hunks
 from .server import (
     _NON_CODE_EXTS,
     _PROJECT_NOT_FOUND,
@@ -169,6 +169,11 @@ def file_summary(path: str, project: str | None = None) -> str:
     }, indent=2)
 
 
+def _git_show_file(root: Path, ref: str, file_path: str) -> str | None:
+    """Return file content at a specific git ref, or None on failure."""
+    return _git_cmd(root, "show", f"{ref}:{file_path}")
+
+
 @mcp.tool()
 def get_diff_context(
     file: str, line_start: int = 0, line_end: int = 0,
@@ -217,22 +222,45 @@ def get_diff_context(
     changed_functions = []
 
     if root and root.is_dir():
-        hunks = get_diff_hunks(root, file, ref=ref or "HEAD")
+        effective_ref = ref or "HEAD"
+        hunks = get_diff_hunks(root, file, ref=effective_ref)
         if hunks and not line_start:
+            # When ref is a historical commit (not HEAD), the diff is
+            # ref~1..ref so hunk line numbers correspond to the file at
+            # ref, not the current working tree.  Parse chunks from the
+            # file at that ref so the overlap check uses matching lines.
+            match_chunks = chunks  # default: indexed (working-tree) chunks
+            if ref and ref != "HEAD":
+                ref_content = _git_show_file(root, ref, file)
+                if ref_content is not None:
+                    disk_path = root / file
+                    ref_chunks = chunk_file(disk_path, ref_content)
+                    if ref_chunks:
+                        match_chunks = ref_chunks
+
             # Auto-detect changed line ranges from git diff
             for hunk in hunks:
                 hunk_start = hunk["start"]
                 hunk_end = hunk_start + hunk["count"]
-                for chunk in chunks:
-                    if (chunk.start_line <= hunk_end and
-                            chunk.end_line >= hunk_start and
-                            chunk.kind in ("function", "method", "class")):
-                        if chunk.name not in [c["name"] for c in changed_functions]:
+                for chunk in match_chunks:
+                    chunk_name = getattr(chunk, "name", "") or ""
+                    chunk_kind = getattr(chunk, "kind", "")
+                    chunk_start = getattr(chunk, "start_line", 0)
+                    chunk_end = getattr(chunk, "end_line", 0)
+                    chunk_content = (
+                        getattr(chunk, "content_text", None)
+                        or getattr(chunk, "content", None)
+                        or ""
+                    )
+                    if (chunk_start <= hunk_end and
+                            chunk_end >= hunk_start and
+                            chunk_kind in ("function", "method", "class")):
+                        if chunk_name not in [c["name"] for c in changed_functions]:
                             changed_functions.append({
-                                "name": chunk.name,
-                                "kind": chunk.kind,
-                                "lines": f"{chunk.start_line}-{chunk.end_line}",
-                                "content": chunk.content_text or "",
+                                "name": chunk_name,
+                                "kind": chunk_kind,
+                                "lines": f"{chunk_start}-{chunk_end}",
+                                "content": chunk_content,
                             })
 
             # If no indexed chunks matched, re-parse the current file on
@@ -563,8 +591,16 @@ def get_tests_for(
     storage = _get_storage()
     project_id = _resolve_project_id(project)
 
-    # Get all test files
-    test_files = storage.get_test_files(project_id=project_id)
+    # Get all test files, filtering out non-code files (benchmarks, docs, etc.)
+    _test_file_exts = {".py", ".js", ".ts", ".jsx", ".tsx", ".rb", ".go",
+                       ".rs", ".java", ".kt", ".cs", ".cpp", ".c"}
+    raw_test_files = storage.get_test_files(project_id=project_id)
+    test_files = [
+        tf for tf in raw_test_files
+        if Path(tf.path).suffix.lower() in _test_file_exts
+        and "/benchmark" not in tf.path.lower()
+        and "/bench_" not in tf.path.lower()
+    ]
     if not test_files:
         return json.dumps({
             "function": function,
@@ -621,12 +657,26 @@ def get_tests_for(
             ):
                 import_match_ids.add(tf.id)
 
+    # conftest files only contribute via import tracing, not content search
+    conftest_ids = {tf.id for tf in test_files
+                    if Path(tf.path).name == "conftest.py"}
+
     for tf in test_files:
         chunks = storage.get_chunks_for_file(tf.id)
+        is_conftest = tf.id in conftest_ids
         file_is_relevant = (
             tf.id in filename_match_ids or tf.id in import_match_ids
         )
         for chunk in chunks:
+            # Skip fixtures, helpers, and non-test functions in test files
+            # Only allow test functions (test_*) or classes (Test*) through
+            # content/reference matching
+            is_test_chunk = (
+                chunk.name
+                and (chunk.name.startswith("test_")
+                     or chunk.name.startswith("Test"))
+            )
+
             # Match by naming convention
             name_match = any(
                 chunk.name and chunk.name.startswith(pat)
@@ -643,6 +693,16 @@ def get_tests_for(
             if file_is_relevant and not name_match and not content_match:
                 if chunk.content_text and func_re.search(chunk.content_text):
                     file_match = True
+
+            # For content/reference/file matches, only include actual test
+            # functions — skip fixtures, helpers, conftest utilities
+            if name_match:
+                pass  # name matches are always relevant
+            elif (content_match or file_match) and (
+                not is_test_chunk or is_conftest
+            ):
+                continue  # skip non-test chunks and conftest helpers
+
             if name_match or content_match or file_match:
                 key = (tf.path, chunk.name)
                 if key not in seen:
@@ -664,14 +724,25 @@ def get_tests_for(
                         "match_type": match_type,
                     })
 
-    all_tests = matching_tests
+    # Sort by relevance: name matches first, then reference, then import/filename
+    _match_priority = {"name": 0, "reference": 1, "import": 2, "filename": 3}
+    matching_tests.sort(key=lambda t: _match_priority.get(t["match_type"], 9))
+
+    # Cap results to keep output focused
+    max_results = 20
+    all_tests = matching_tests[:max_results]
 
     if not all_tests:
         msg = f"No tests found for '{function}'"
         if file:
             msg += f" in {file}"
         return msg
-    header = f"tests for: {function}  ({len(all_tests)} found)"
+    total = len(matching_tests)
+    shown = min(total, max_results)
+    header = f"tests for: {function}  ({shown} found"
+    if total > max_results:
+        header += f", showing {shown}/{total}"
+    header += ")"
     if file:
         header += f"  source: {file}"
-    return header + "\n\n" + _fmt_chunks(all_tests[:30])
+    return header + "\n\n" + _fmt_chunks(all_tests)

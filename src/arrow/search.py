@@ -735,45 +735,15 @@ class HybridSearcher:
         header_overhead = 15
         max_chunks_per_file = 3
 
-        # --- Relevance-first filtering ---
+        # --- Relevance filtering ---
         # The search() method already ran filter_by_relevance() on the raw
-        # RRF scores.  Here we apply a second pass on materialised results
-        # to catch anything that slipped through (e.g. after frecency boost
-        # or penalty adjustments changed the ordering).
-        #
-        # Minimum guarantee: always keep at least _MIN_RESULTS_FLOOR results
-        # so the caller never gets zero chunks when candidates exist.
+        # RRF scores (with score-ratio floor, cliff detection, and a
+        # _MIN_RESULTS_FLOOR guarantee).  We trust that filtering here and
+        # do NOT apply a second pass — doing so can amplify score gaps
+        # introduced by boosts/penalties and drop results below the floor,
+        # causing zero-result responses.
 
-        top_score = results[0].score
-        if top_score <= 0:
-            top_score = 1.0
-
-        # 1) Absolute relevance floor: drop anything < 25% of top score
-        relevance_floor = _MIN_SCORE_RATIO  # 0.25
-
-        # 2) Score cliff detection: stop when a result's score drops to
-        #    < 40% of the *previous* result's score (big gap = irrelevant tail)
-        cliff_ratio = _SCORE_DROP_RATIO  # 0.4
-
-        min_keep = min(_MIN_RESULTS_FLOOR, len(results))
-
-        relevant_results: list[SearchResult] = []
-        prev_score = top_score
-
-        for result in results:
-            ratio_vs_top = result.score / top_score
-            ratio_vs_prev = result.score / prev_score if prev_score > 0 else 0.0
-
-            # Floor: below minimum relevance relative to the best result
-            if ratio_vs_top < relevance_floor and len(relevant_results) >= min_keep:
-                break
-
-            # Cliff: sudden drop compared to the previous result
-            if ratio_vs_prev < cliff_ratio and len(relevant_results) >= min_keep:
-                break
-
-            relevant_results.append(result)
-            prev_score = result.score
+        relevant_results = results
 
         # --- Assemble output, respecting token ceiling and per-file cap ---
         selected = []

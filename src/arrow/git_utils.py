@@ -223,18 +223,28 @@ def get_changed_files_between(path: Path, base: str, head: str) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
-def get_diff_hunks(path: Path, file_path: str, ref: str = "HEAD") -> list[dict]:
+def get_diff_hunks(
+    path: Path, file_path: str, ref: str = "HEAD",
+) -> list[dict]:
     """Get diff hunks for a file showing changed line ranges.
 
     Returns list of {"start": int, "count": int, "lines": [...]} for each hunk.
-    Compares working tree against ref (default HEAD), or ref~1..ref if no
-    working tree changes.
+    For ref="HEAD": diffs working tree against HEAD.
+    For other refs: diffs ref~1..ref (the commit's own changes), falling back
+    to working-tree diff if the commit-specific diff is empty.
     """
-    # Try working tree diff first
-    output = _git_cmd(path, "diff", "-U0", ref, "--", file_path)
-    if not output:
-        # Try committed diff (last commit)
+    if ref and ref != "HEAD":
+        # For historical refs, show the commit's own changes first
         output = _git_cmd(path, "diff", "-U0", f"{ref}~1", ref, "--", file_path)
+        if not output:
+            # Fall back to working-tree diff
+            output = _git_cmd(path, "diff", "-U0", ref, "--", file_path)
+    else:
+        # Default: working tree diff against HEAD
+        output = _git_cmd(path, "diff", "-U0", ref, "--", file_path)
+        if not output:
+            # Try committed diff (last commit)
+            output = _git_cmd(path, "diff", "-U0", f"{ref}~1", ref, "--", file_path)
     if not output:
         return []
 

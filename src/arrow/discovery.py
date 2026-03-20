@@ -73,6 +73,8 @@ DEFAULT_IGNORE = {
     "*.db",
     "*.sqlite",
     "*.sqlite3",
+    # Generated reports — prose pollutes code search results
+    "benchmarks/reports",
 }
 
 # Max file size to index (1MB)

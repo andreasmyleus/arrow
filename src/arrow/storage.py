@@ -1428,11 +1428,16 @@ class Storage:
                     or name in ("main", "setup", "teardown")):
                 continue
 
-            # Check if any other chunk references this name
+            # Check if any other chunk in source code references this name
             count = self.conn.execute(
-                """SELECT COUNT(*) FROM chunks
-                   WHERE content_text LIKE ?
-                   AND id != ?""",
+                """SELECT COUNT(*) FROM chunks c
+                   JOIN files f ON f.id = c.file_id
+                   WHERE c.content_text LIKE ?
+                   AND c.id != ?
+                   AND f.language NOT IN (
+                       'markdown', 'json', 'yaml', 'toml',
+                       'csv', 'xml', 'text', 'plaintext'
+                   )""",
                 (f"%{name}%", sym["chunk_id"]),
             ).fetchone()[0]
 
