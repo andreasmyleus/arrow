@@ -406,8 +406,8 @@ class Indexer:
         if not all_files:
             return {"error": f"No files found at commit {ref}"}
 
-        # Filter to files with known language extensions
-        files = [f for f in all_files if detect_language(PurePosixPath(f))]
+        # All text files are indexable (fallback chunking handles unknown languages)
+        files = all_files
 
         stats = {
             "files_scanned": len(all_files),

@@ -227,11 +227,35 @@ def decompress_content(data: bytes) -> str:
     return _zstd_decompressor.decompress(data).decode("utf-8")
 
 
+# Well-known files without extensions (or with dotfile-style names)
+_KNOWN_FILENAMES: dict[str, str] = {
+    "makefile": "makefile",
+    "gnumakefile": "makefile",
+    "cmakelists.txt": "cmake",
+    "procfile": "procfile",
+    ".dockerignore": "dockerignore",
+    ".gitignore": "gitignore",
+    ".gitattributes": "gitattributes",
+    ".editorconfig": "editorconfig",
+    ".env.example": "dotenv",
+    ".env.sample": "dotenv",
+    ".env.template": "dotenv",
+    "vagrantfile": "ruby",
+    "gemfile": "ruby",
+    "rakefile": "ruby",
+    "justfile": "justfile",
+}
+
+
 def detect_language(filepath: Path) -> Optional[str]:
-    """Detect language from file extension."""
-    # Handle Dockerfile specially
+    """Detect language from file extension or well-known filename."""
+    # Handle Dockerfile specially (Dockerfile, Dockerfile.prod, etc.)
     if filepath.name.lower().startswith("dockerfile"):
         return "dockerfile"
+    # Check well-known filenames
+    known = _KNOWN_FILENAMES.get(filepath.name.lower())
+    if known:
+        return known
     return EXTENSION_MAP.get(filepath.suffix.lower())
 
 

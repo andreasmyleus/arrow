@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 # Non-code languages get a score penalty so they don't dominate search results
 _NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
 
+_TEST_PATH_MARKERS = ("test_", "_test.", "tests/", "__tests__/", "spec/", "/test/")
+
+
+def _is_test_path(path_lower: str) -> bool:
+    """Check if a file path looks like a test file."""
+    return any(m in path_lower for m in _TEST_PATH_MARKERS)
+
 _encoder: Optional[tiktoken.Encoding] = None
 
 
@@ -193,12 +200,32 @@ class HybridSearcher:
                 rec = self.storage.get_file_by_id(fid)
                 if rec:
                     penalty_files[fid] = rec
+
+            # Build query terms for path boosting
+            query_terms = [t.lower() for t in query.split() if len(t) >= 3]
+            query_mentions_test = any(
+                t in ("test", "tests", "testing", "spec") for t in query_terms
+            )
+
             penalized = []
             for cid, score in fused:
                 fid = penalty_chunks.get(cid)
                 frec = penalty_files.get(fid) if fid else None
-                if frec and frec.language in _NON_CODE_LANGS:
-                    score = score * get_config().search.non_code_penalty
+                if frec:
+                    path_lower = frec.path.lower()
+
+                    # Non-code penalty (existing)
+                    if frec.language in _NON_CODE_LANGS:
+                        score = score * get_config().search.non_code_penalty
+
+                    # Path boost: if query terms appear in the file path
+                    if query_terms and any(t in path_lower for t in query_terms):
+                        score = score * 1.5
+
+                    # Test file penalty when query isn't about tests
+                    if not query_mentions_test and _is_test_path(path_lower):
+                        score = score * 0.7
+
                 penalized.append((cid, score))
             fused = sorted(penalized, key=lambda x: x[1], reverse=True)
 
@@ -317,10 +344,17 @@ class HybridSearcher:
             }
 
         HEADER_OVERHEAD = 15
+        MAX_CHUNKS_PER_FILE = 3
         selected = []
         tokens_used = 0
+        file_chunk_counts: dict[str, int] = {}
 
         for result in results:
+            # Enforce per-file diversity cap
+            fp = result.file_path
+            if file_chunk_counts.get(fp, 0) >= MAX_CHUNKS_PER_FILE:
+                continue
+
             chunk_tokens = (result.chunk.token_count or 0) + HEADER_OVERHEAD
 
             if tokens_used + chunk_tokens > token_budget:
@@ -350,6 +384,7 @@ class HybridSearcher:
                             "tokens": est_tokens,
                         })
                         tokens_used += est_tokens
+                        file_chunk_counts[fp] = file_chunk_counts.get(fp, 0) + 1
                 break
 
             selected.append({
@@ -363,6 +398,7 @@ class HybridSearcher:
                 "tokens": chunk_tokens,
             })
             tokens_used += chunk_tokens
+            file_chunk_counts[fp] = file_chunk_counts.get(fp, 0) + 1
 
         return {
             "query": query,
