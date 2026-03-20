@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 # Non-code languages get a score penalty so they don't dominate search results
 _NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
 
+# Query terms that signal the user wants config/non-code files
+_CONFIG_QUERY_TERMS = {
+    "toml", "yaml", "yml", "json", "dockerfile", "docker",
+    "config", "configuration", "pyproject", "package",
+    "readme", "markdown", "md", "cargo", "makefile",
+    "healthcheck", "compose", "requirements", "setup",
+    "dependencies", "devcontainer",
+}
+
 _TEST_PATH_MARKERS = ("test_", "_test.", "tests/", "__tests__/", "spec/", "/test/")
 
 # Keywords that signal the user wants documentation, not source code
@@ -516,6 +525,9 @@ class HybridSearcher:
                 for t in query_concepts
             )
             query_is_doc = _is_doc_query(query.lower())
+            query_mentions_config = any(
+                t.lower() in _CONFIG_QUERY_TERMS for t in query.split()
+            )
 
             adjusted = []
             for cid, score in fused:
@@ -527,13 +539,12 @@ class HybridSearcher:
                     # File-type scoring: boost or penalize based on query intent
                     if frec.language in _NON_CODE_LANGS:
                         if query_is_doc and _is_doc_path(path_lower):
-                            # Doc query + doc file (README, etc.): strong boost
                             score = score * 2.5
                         elif query_is_doc and frec.language == "markdown":
-                            # Doc query + any markdown file: mild boost
                             score = score * 1.3
+                        elif query_mentions_config:
+                            pass  # Skip penalty when query targets config files
                         else:
-                            # Non-doc query: penalize non-code files as before
                             score = score * get_config().search.non_code_penalty
 
                     # File-name match boost (uses concept extraction
