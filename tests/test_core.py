@@ -581,17 +581,17 @@ class TestSearch:
     def test_filename_boost_in_ranking(self, db, tmp_path):
         """Files whose name matches query concepts should rank higher."""
         # Create two files: frecency.py (should rank higher for "frecency" query)
-        # and unrelated.py (has the word frecency buried in code)
+        # and utils.py (also defines a frecency function but in a generic file)
         (tmp_path / "frecency.py").write_text(
             "def calculate_frecency(file_id):\n"
             "    '''Calculate frecency score.'''\n"
             "    return 1.0\n"
         )
-        (tmp_path / "unrelated.py").write_text(
-            "def process_data():\n"
-            "    # This mentions frecency in a comment\n"
-            "    # frecency frecency frecency\n"
-            "    return None\n"
+        (tmp_path / "utils.py").write_text(
+            "def update_frecency(file_id, weight):\n"
+            "    '''Update frecency for a file.'''\n"
+            "    frecency = weight * 0.5\n"
+            "    return frecency\n"
         )
 
         idx = Indexer(db)
