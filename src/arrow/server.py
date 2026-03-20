@@ -515,6 +515,7 @@ def search_regex(
     pattern: str,
     limit: int = 50,
     context_lines: int = 2,
+    multiline: bool = False,
     project: str | None = None,
 ) -> str:
     """Search code with a regex pattern, showing matched lines with context.
@@ -526,6 +527,9 @@ def search_regex(
         pattern: Python regex pattern (e.g. r"except.*:.*log", r"os\\.environ").
         limit: Maximum number of matching lines to return (default 50).
         context_lines: Lines of context around each match, like grep -C (default 2).
+        multiline: When True, uses re.DOTALL so . matches newlines and patterns
+            can span across lines (e.g. r"except.*?log" matches an except on one
+            line and a logger call on the next). Default False for single-line mode.
         project: Optional project name to scope search.
 
     Returns:
@@ -539,8 +543,9 @@ def search_regex(
     limit = min(limit, 500)
     context_lines = max(0, min(context_lines, 10))
 
+    flags = (re.DOTALL | re.MULTILINE) if multiline else 0
     try:
-        compiled = re.compile(pattern)
+        compiled = re.compile(pattern, flags)
     except re.error as exc:
         return json.dumps({"error": f"Invalid regex: {exc}"})
 
@@ -568,12 +573,12 @@ def search_regex(
     if project_root:
         # On-disk search: grep actual files for precise line-level results
         results = _search_regex_on_disk(
-            compiled, project_root, limit, context_lines
+            compiled, project_root, limit, context_lines, multiline
         )
     else:
         # Fallback: search indexed chunks (for remote projects or no root)
         results = _search_regex_in_chunks(
-            compiled, storage, project_id, limit, context_lines
+            compiled, storage, project_id, limit, context_lines, multiline
         )
 
     latency = (time.time() - t0) * 1000
@@ -589,6 +594,7 @@ def _search_regex_on_disk(
     project_root: Path,
     limit: int,
     context_lines: int,
+    multiline: bool = False,
 ) -> str:
     """Search files on disk with regex, returning grep-like output."""
     from .discovery import discover_files
@@ -606,10 +612,20 @@ def _search_regex_on_disk(
             continue
 
         # Find matching line numbers
-        match_line_nos = []
-        for i, line in enumerate(lines):
-            if compiled.search(line):
-                match_line_nos.append(i)
+        match_line_nos: list[int] = []
+        if multiline:
+            # Search full file content so patterns can span lines
+            content = "".join(lines)
+            for m in compiled.finditer(content):
+                line_no = content.count("\n", 0, m.start())
+                end_line = content.count("\n", 0, m.end())
+                for ln in range(line_no, end_line + 1):
+                    if ln not in match_line_nos:
+                        match_line_nos.append(ln)
+        else:
+            for i, line in enumerate(lines):
+                if compiled.search(line):
+                    match_line_nos.append(i)
 
         if not match_line_nos:
             continue
@@ -655,6 +671,7 @@ def _search_regex_in_chunks(
     project_id: int | None,
     limit: int,
     context_lines: int,
+    multiline: bool = False,
 ) -> str:
     """Search indexed chunks with regex (fallback for remote projects)."""
     chunks = storage.search_regex(
@@ -673,10 +690,18 @@ def _search_regex_in_chunks(
 
         text = chunk.content_text or ""
         lines = text.split("\n")
-        match_line_nos = []
-        for i, line in enumerate(lines):
-            if compiled.search(line):
-                match_line_nos.append(i)
+        match_line_nos: list[int] = []
+        if multiline:
+            for m in compiled.finditer(text):
+                line_no = text.count("\n", 0, m.start())
+                end_line = text.count("\n", 0, m.end())
+                for ln in range(line_no, end_line + 1):
+                    if ln not in match_line_nos:
+                        match_line_nos.append(ln)
+        else:
+            for i, line in enumerate(lines):
+                if compiled.search(line):
+                    match_line_nos.append(i)
 
         if not match_line_nos:
             continue
@@ -879,7 +904,8 @@ def get_context(
 
 @mcp.tool()
 def search_structure(
-    symbol: str, kind: str = "any", project: str | None = None
+    symbol: str = "*", kind: str = "any", limit: int = 100,
+    project: str | None = None,
 ) -> str:
     """Find functions, classes, or variables by name via the AST structure index.
 
@@ -887,9 +913,14 @@ def search_structure(
     are returned exclusively when found; prefix matches are only included
     when there is no exact match.
 
+    Pass symbol='*' or empty string with a specific kind (e.g., kind='class')
+    to enumerate all symbols of that kind without needing per-letter queries.
+
     Args:
         symbol: Name to search for. Exact matches prioritized over prefix.
+                Use '*' or '' with a specific kind to list all symbols of that kind.
         kind: Filter by kind: "function", "class", "method", "any".
+        limit: Maximum number of results to return (default 100).
         project: Optional project name to scope search.
 
     Returns:
@@ -897,8 +928,13 @@ def search_structure(
     """
     valid_kinds = {"function", "class", "method", "any"}
     storage = _get_storage()
-    if not symbol or not symbol.strip():
-        return json.dumps({"error": "symbol is required"})
+    wildcard = not symbol or not symbol.strip() or symbol.strip() == "*"
+
+    if wildcard and kind == "any":
+        return json.dumps({
+            "error": "symbol is required when kind is 'any' "
+            "(use a specific kind like 'class' to enumerate)",
+        })
 
     if kind not in valid_kinds:
         return json.dumps({
@@ -912,18 +948,28 @@ def search_structure(
     if err:
         return err
 
-    symbol_name = symbol.strip()
     project_id = _resolve_project_id(project)
-    symbols = storage.search_symbols(
-        symbol_name,
-        kind=kind if kind != "any" else None,
-        project_id=project_id,
-    )
 
-    # If we have exact matches, only return those — avoids prefix noise
-    # (e.g. searching "search" returning "search_code", "search_fts", …)
-    exact = [s for s in symbols if s.name == symbol_name]
-    matched = exact if exact else symbols
+    if wildcard:
+        # Enumerate all symbols of the given kind
+        matched = storage.enumerate_symbols_by_kind(
+            kind=kind,
+            limit=limit,
+            project_id=project_id,
+        )
+    else:
+        symbol_name = symbol.strip()
+        symbols = storage.search_symbols(
+            symbol_name,
+            kind=kind if kind != "any" else None,
+            project_id=project_id,
+            limit=limit,
+        )
+
+        # If we have exact matches, only return those — avoids prefix noise
+        # (e.g. searching "search" returning "search_code", "search_fts", …)
+        exact = [s for s in symbols if s.name == symbol_name]
+        matched = exact if exact else symbols
 
     # Deduplicate by chunk_id
     seen_chunks: set[int] = set()
