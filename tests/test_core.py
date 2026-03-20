@@ -17,7 +17,12 @@ from arrow.chunker import (
 from arrow.discovery import discover_files
 from arrow.hasher import hash_content, hash_file
 from arrow.indexer import Indexer, count_tokens
-from arrow.search import HybridSearcher, reciprocal_rank_fusion
+from arrow.search import (
+    HybridSearcher,
+    reciprocal_rank_fusion,
+    _extract_query_concepts,
+    _filename_match_boost,
+)
 from arrow.storage import Storage
 
 
@@ -513,3 +518,87 @@ class TestSearch:
         ctx = searcher.get_context("main function", token_budget=4000)
         if ctx["chunks"]:
             assert "project" in ctx["chunks"][0]
+
+    def test_rrf_k20_favors_top_ranks(self):
+        """With k=20, items appearing at rank 0 in both lists should score
+        significantly higher than items only in one list at a low rank."""
+        # Item 1 is #1 in both lists; item 99 is #49 in one list only
+        list1 = [(1, 0.9)] + [(i, 0.5) for i in range(2, 51)]
+        list2 = [(1, 0.9)] + [(i + 50, 0.5) for i in range(2, 51)]
+        fused = reciprocal_rank_fusion([list1, list2])
+        scores = dict(fused)
+        # Item 1 should score ~2 * 1/(20+1) = 0.095
+        # A single-list item at rank 49 scores 1/(20+50) = 0.014
+        assert scores[1] > scores.get(50, 0) * 3
+
+    def test_filename_boost_in_ranking(self, db, tmp_path):
+        """Files whose name matches query concepts should rank higher."""
+        # Create two files: frecency.py (should rank higher for "frecency" query)
+        # and unrelated.py (has the word frecency buried in code)
+        (tmp_path / "frecency.py").write_text(
+            "def calculate_frecency(file_id):\n"
+            "    '''Calculate frecency score.'''\n"
+            "    return 1.0\n"
+        )
+        (tmp_path / "unrelated.py").write_text(
+            "def process_data():\n"
+            "    # This mentions frecency in a comment\n"
+            "    # frecency frecency frecency\n"
+            "    return None\n"
+        )
+
+        idx = Indexer(db)
+        idx.index_codebase(tmp_path)
+        searcher = HybridSearcher(db)
+        results = searcher.search("frecency", limit=5)
+
+        assert len(results) >= 2
+        # frecency.py should rank first due to filename match boost
+        assert "frecency.py" in results[0].file_path
+
+
+# --- Query concept extraction tests ---
+
+
+class TestQueryConceptExtraction:
+    def test_filters_stop_words(self):
+        concepts = _extract_query_concepts("how is frecency calculated")
+        assert "frecency" in concepts
+        assert "calculated" in concepts
+        assert "how" not in concepts
+        assert "is" not in concepts
+
+    def test_splits_snake_case(self):
+        concepts = _extract_query_concepts("reciprocal_rank_fusion")
+        assert "reciprocal_rank_fusion" in concepts
+        assert "reciprocal" in concepts
+        assert "rank" in concepts  # 4 chars, not a stop word
+        assert "fusion" in concepts
+
+    def test_short_tokens_filtered(self):
+        concepts = _extract_query_concepts("a to be or")
+        assert concepts == []
+
+    def test_code_terms_filtered(self):
+        """Common code-related words should be filtered as stop words."""
+        concepts = _extract_query_concepts("find the function definition")
+        assert "find" not in concepts
+        assert "function" not in concepts
+        assert "definition" in concepts
+
+
+class TestFilenameMatchBoost:
+    def test_exact_stem_match(self):
+        assert _filename_match_boost("src/frecency.py", ["frecency"]) == 2.0
+
+    def test_partial_stem_match(self):
+        assert _filename_match_boost("src/vector_store.py", ["vector"]) == 1.5
+
+    def test_no_match(self):
+        assert _filename_match_boost("src/server.py", ["frecency"]) == 1.0
+
+    def test_empty_concepts(self):
+        assert _filename_match_boost("src/anything.py", []) == 1.0
+
+    def test_case_insensitive(self):
+        assert _filename_match_boost("src/Frecency.py", ["frecency"]) == 2.0

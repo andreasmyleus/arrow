@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -19,6 +21,66 @@ logger = logging.getLogger(__name__)
 _NON_CODE_LANGS = {"markdown", "json", "yaml", "toml", "csv", "xml"}
 
 _TEST_PATH_MARKERS = ("test_", "_test.", "tests/", "__tests__/", "spec/", "/test/")
+
+# Words to ignore when matching query terms against file names
+_STOP_WORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must",
+    "and", "but", "or", "nor", "not", "so", "yet", "both", "either",
+    "how", "what", "where", "when", "who", "which", "that", "this",
+    "for", "from", "with", "without", "about", "into", "through",
+    "in", "on", "at", "to", "of", "by", "as", "if", "then",
+    "all", "each", "every", "any", "some", "no", "more", "most",
+    "it", "its", "my", "your", "our", "their", "his", "her",
+    "def", "class", "function", "method", "file", "code",
+    "find", "show", "get", "list", "search", "look", "use", "used",
+})
+
+
+def _extract_query_concepts(query: str) -> list[str]:
+    """Extract meaningful concept terms from a query, filtering stop words.
+
+    Returns lowercase terms of 3+ characters that aren't stop words.
+    Also splits snake_case tokens into sub-terms.
+    """
+    raw_tokens = re.split(r'[^a-zA-Z0-9_]+', query.lower())
+    concepts = []
+    for token in raw_tokens:
+        if len(token) < 3 or token in _STOP_WORDS:
+            continue
+        concepts.append(token)
+        # Also add sub-parts of snake_case tokens
+        if '_' in token:
+            for part in token.split('_'):
+                if len(part) >= 3 and part not in _STOP_WORDS and part != token:
+                    concepts.append(part)
+    return concepts
+
+
+def _filename_match_boost(path: str, concepts: list[str]) -> float:
+    """Score how well a file name matches query concepts.
+
+    Returns a boost multiplier:
+    - 1.0 = no match
+    - 2.0 = file stem matches a concept exactly (e.g. query "frecency" -> frecency.py)
+    - 1.5 = file stem contains a concept (e.g. query "vector" -> vector_store.py)
+    """
+    if not concepts:
+        return 1.0
+
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+
+    # Exact stem match: "frecency" query -> frecency.py
+    if stem in concepts:
+        return 2.0
+
+    # Stem contains a concept: "vector" query -> vector_store.py
+    for concept in concepts:
+        if concept in stem:
+            return 1.5
+
+    return 1.0
 
 
 def _is_test_path(path_lower: str) -> bool:
@@ -53,9 +115,14 @@ class SearchResult:
 
 def reciprocal_rank_fusion(
     ranked_lists: list[list[tuple[int, float]]],
-    k: int = 60,
+    k: int = 20,
 ) -> list[tuple[int, float]]:
-    """Combine multiple ranked lists using Reciprocal Rank Fusion."""
+    """Combine multiple ranked lists using Reciprocal Rank Fusion.
+
+    A lower k value (default 20, down from the standard 60) gives more
+    weight to top-ranked results, improving precision when BM25 and
+    vector search agree on what's most relevant.
+    """
     scores: dict[int, float] = {}
     for ranked_list in ranked_lists:
         for rank, (item_id, _score) in enumerate(ranked_list):
@@ -111,8 +178,11 @@ class HybridSearcher:
         fts_results = self.storage.search_fts(
             query, limit=fts_limit, project_id=project_id
         )
+        # Build a set of chunk IDs that BM25 found (for exact-match bonus)
+        bm25_hit_ids: set[int] = set()
         if fts_results:
             bm25_ranked = [(cid, -score) for cid, score in fts_results]
+            bm25_hit_ids = {cid for cid, _ in bm25_ranked}
             ranked_lists.append(bm25_ranked)
 
         # Vector search (if available)
@@ -151,7 +221,7 @@ class HybridSearcher:
         if not ranked_lists:
             return []
 
-        # Reciprocal rank fusion
+        # Reciprocal rank fusion (k=20 for sharper top-rank differentiation)
         fused = reciprocal_rank_fusion(ranked_lists)
 
         # Filter out already-sent chunks (conversation awareness)
@@ -187,47 +257,54 @@ class HybridSearcher:
                     boosted, key=lambda x: x[1], reverse=True
                 )
 
-        # Penalize non-code files (json, markdown, etc.) so they don't
-        # dominate results over actual source code
-        penalty_ids = [cid for cid, _ in fused[:limit * 3]]
-        if penalty_ids:
-            penalty_chunks = {
+        # --- Scoring adjustments: file-name boost, BM25 bonus, penalties ---
+        # Extract meaningful concepts from the query for file-name matching
+        query_concepts = _extract_query_concepts(query)
+
+        adjust_ids = [cid for cid, _ in fused[:limit * 3]]
+        if adjust_ids:
+            adjust_chunks = {
                 c.id: c.file_id
-                for c in self.storage.get_chunks_by_ids(penalty_ids)
+                for c in self.storage.get_chunks_by_ids(adjust_ids)
             }
-            penalty_files = {}
-            for fid in set(penalty_chunks.values()):
+            adjust_files = {}
+            for fid in set(adjust_chunks.values()):
                 rec = self.storage.get_file_by_id(fid)
                 if rec:
-                    penalty_files[fid] = rec
+                    adjust_files[fid] = rec
 
-            # Build query terms for path boosting
-            query_terms = [t.lower() for t in query.split() if len(t) >= 3]
             query_mentions_test = any(
-                t in ("test", "tests", "testing", "spec") for t in query_terms
+                t in ("test", "tests", "testing", "spec")
+                for t in query_concepts
             )
 
-            penalized = []
+            adjusted = []
             for cid, score in fused:
-                fid = penalty_chunks.get(cid)
-                frec = penalty_files.get(fid) if fid else None
+                fid = adjust_chunks.get(cid)
+                frec = adjust_files.get(fid) if fid else None
                 if frec:
                     path_lower = frec.path.lower()
 
-                    # Non-code penalty (existing)
+                    # Non-code penalty
                     if frec.language in _NON_CODE_LANGS:
                         score = score * get_config().search.non_code_penalty
 
-                    # Path boost: if query terms appear in the file path
-                    if query_terms and any(t in path_lower for t in query_terms):
-                        score = score * 1.5
+                    # File-name match boost (uses concept extraction
+                    # instead of raw query terms for better matching)
+                    name_boost = _filename_match_boost(path_lower, query_concepts)
+                    score = score * name_boost
+
+                    # Exact-match bonus: chunks found by BM25 (keyword match)
+                    # get a 20% boost — they contain the literal query terms
+                    if cid in bm25_hit_ids:
+                        score = score * 1.2
 
                     # Test file penalty when query isn't about tests
                     if not query_mentions_test and _is_test_path(path_lower):
                         score = score * 0.7
 
-                penalized.append((cid, score))
-            fused = sorted(penalized, key=lambda x: x[1], reverse=True)
+                adjusted.append((cid, score))
+            fused = sorted(adjusted, key=lambda x: x[1], reverse=True)
 
         # Batch fetch chunks and files to avoid N+1 queries
         top = fused[:limit]
