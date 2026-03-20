@@ -554,6 +554,13 @@ class HybridSearcher:
                 if frec:
                     path_lower = frec.path.lower()
 
+                    # File-name match boost (uses concept extraction
+                    # instead of raw query terms for better matching).
+                    # Computed early so it can suppress non-code penalties.
+                    name_boost = _filename_match_boost(
+                        path_lower, query_concepts,
+                    )
+
                     # File-type scoring: boost or penalize based on query intent
                     if frec.language in _NON_CODE_LANGS:
                         if query_is_doc and _is_doc_path(path_lower):
@@ -562,12 +569,11 @@ class HybridSearcher:
                             score = score * 1.3
                         elif query_mentions_config:
                             pass  # Skip penalty when query targets config files
+                        elif name_boost > 1.0:
+                            pass  # Skip penalty when filename/path matches query
                         else:
                             score = score * get_config().search.non_code_penalty
 
-                    # File-name match boost (uses concept extraction
-                    # instead of raw query terms for better matching)
-                    name_boost = _filename_match_boost(path_lower, query_concepts)
                     score = score * name_boost
 
                     # Exact-match bonus: chunks found by BM25 (keyword match)
