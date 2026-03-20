@@ -243,9 +243,80 @@ class TestSearchRegexHelpers:
                 "line 5\n"
             )
             compiled = re.compile(r"match_[ab]")
-            result = _search_regex_on_disk(compiled, Path(tmpdir), 50, 1)
+            result = _search_regex_on_disk(compiled, Path(tmpdir).resolve(), 50, 1)
             # With context=1, matches on lines 2 and 4 should merge
             # (context of line 2 is 1-3, context of line 4 is 3-5, they overlap at line 3)
             assert "2 matches" in result
             # Should NOT have "..." separator since contexts merged
             assert "..." not in result
+
+
+class TestSearchRegexMultiline:
+    """Test multiline regex support (patterns spanning multiple lines)."""
+
+    def test_multiline_on_disk_spans_lines(self):
+        """Multiline pattern should match across line boundaries."""
+        from arrow.server import _search_regex_on_disk
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "handler.py"
+            filepath.write_text(
+                "def handle():\n"
+                "    try:\n"
+                "        do_work()\n"
+                "    except KeyError:\n"
+                "        logger.error('fail')\n"
+                "        return None\n"
+            )
+            # This pattern spans from "except" on one line to "logger" on the next
+            compiled = re.compile(r"except.*?logger", re.DOTALL)
+            result = _search_regex_on_disk(compiled, Path(tmpdir).resolve(), 50, 1, multiline=True)
+            assert "matches" in result
+            assert "0 matches" not in result
+            # Both the except line and the logger line should be marked
+            assert "except" in result
+            assert "logger" in result
+
+    def test_multiline_off_does_not_span_lines(self):
+        """Without multiline, cross-line patterns should not match."""
+        from arrow.server import _search_regex_on_disk
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "handler.py"
+            filepath.write_text(
+                "def handle():\n"
+                "    try:\n"
+                "        do_work()\n"
+                "    except KeyError:\n"
+                "        logger.error('fail')\n"
+                "        return None\n"
+            )
+            compiled = re.compile(r"except.*?logger")
+            result = _search_regex_on_disk(compiled, Path(tmpdir).resolve(), 50, 1, multiline=False)
+            assert "0 matches" in result
+
+    def test_multiline_integration(self, indexed_regex_project):
+        """Multiline search via the top-level tool should find cross-line patterns."""
+        from arrow.server import search_regex
+
+        # errors.py has "except KeyError:\n        logger.error(...)"
+        result = search_regex(r"except KeyError.*?logger", multiline=True)
+        assert "matches" in result
+        assert "0 matches" not in result
+        assert "logger" in result
+
+    def test_multiline_false_backward_compat(self, indexed_regex_project):
+        """Default multiline=False should behave like before."""
+        from arrow.server import search_regex
+
+        # Single-line pattern should still work
+        result = search_regex(r"os\.environ")
+        assert ">>>os.environ<<<" in result
+
+    def test_multiline_single_line_pattern_still_works(self, indexed_regex_project):
+        """A single-line pattern with multiline=True should still find matches."""
+        from arrow.server import search_regex
+
+        result = search_regex(r"def \w+", multiline=True)
+        assert "matches" in result
+        assert "0 matches" not in result
