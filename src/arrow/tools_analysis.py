@@ -172,7 +172,7 @@ def file_summary(path: str, project: str | None = None) -> str:
 @mcp.tool()
 def get_diff_context(
     file: str, line_start: int = 0, line_end: int = 0,
-    project: str | None = None,
+    ref: str | None = None, project: str | None = None,
 ) -> str:
     """Get changed code plus all callers and dependents of modified functions.
 
@@ -184,6 +184,10 @@ def get_diff_context(
         file: Relative path to the changed file.
         line_start: Start of line range to focus on (0 = auto-detect from git diff).
         line_end: End of line range (0 = auto-detect from git diff).
+        ref: Git ref to diff against (e.g., "HEAD~1", a commit SHA, or branch
+             name). When omitted, diffs uncommitted working tree changes against
+             HEAD. When provided, diffs against that ref — and if the working
+             tree is clean, compares ref~1..ref to show that commit's changes.
         project: Optional project name to scope lookup.
 
     Returns:
@@ -213,7 +217,7 @@ def get_diff_context(
     changed_functions = []
 
     if root and root.is_dir():
-        hunks = get_diff_hunks(root, file)
+        hunks = get_diff_hunks(root, file, ref=ref or "HEAD")
         if hunks and not line_start:
             # Auto-detect changed line ranges from git diff
             for hunk in hunks:
@@ -579,8 +583,49 @@ def get_tests_for(
         f"test{camel_name}",
     ]
 
+    # Pre-compile regex for content/filename matching
+    func_re = re.compile(rf'\b{re.escape(function)}\b')
+
+    # Identify test files whose filename contains the function name
+    # (e.g., test_search_regex.py matches function "search")
+    filename_match_ids = set()
+    for tf in test_files:
+        tf_stem = Path(tf.path).stem
+        if func_re.search(tf_stem):
+            filename_match_ids.add(tf.id)
+
+    # Find test files that import the source module
+    import_match_ids = set()
+    if file:
+        source_stems = {Path(file).stem}
+    else:
+        # Resolve which files define this function from the index
+        source_stems = set()
+        func_syms = storage.search_symbols(function, limit=10)
+        for sym in func_syms:
+            if sym.name == function:
+                frec = storage.get_file_by_id(sym.file_id)
+                if frec and (project_id is None or frec.project_id == project_id):
+                    source_stems.add(Path(frec.path).stem)
+
+    if source_stems:
+        for tf in test_files:
+            imports = storage.conn.execute(
+                "SELECT symbol FROM imports WHERE source_file = ?",
+                (tf.id,),
+            ).fetchall()
+            if any(
+                s in (imp[0] or "")
+                for imp in imports
+                for s in source_stems
+            ):
+                import_match_ids.add(tf.id)
+
     for tf in test_files:
         chunks = storage.get_chunks_for_file(tf.id)
+        file_is_relevant = (
+            tf.id in filename_match_ids or tf.id in import_match_ids
+        )
         for chunk in chunks:
             # Match by naming convention
             name_match = any(
@@ -591,54 +636,35 @@ def get_tests_for(
             # false positives for short names like "get", "set")
             content_match = False
             if chunk.content_text and not name_match:
-                content_match = bool(
-                    re.search(rf'\b{re.escape(function)}\b',
-                              chunk.content_text)
-                )
-            if name_match or content_match:
+                content_match = bool(func_re.search(chunk.content_text))
+            # For filename/import-matched files, include chunks that
+            # reference the function even if name didn't match
+            file_match = False
+            if file_is_relevant and not name_match and not content_match:
+                if chunk.content_text and func_re.search(chunk.content_text):
+                    file_match = True
+            if name_match or content_match or file_match:
                 key = (tf.path, chunk.name)
                 if key not in seen:
                     seen.add(key)
+                    if name_match:
+                        match_type = "name"
+                    elif content_match:
+                        match_type = "reference"
+                    elif tf.id in import_match_ids:
+                        match_type = "import"
+                    else:
+                        match_type = "filename"
                     matching_tests.append({
                         "file": tf.path,
                         "test_name": chunk.name,
                         "kind": chunk.kind,
                         "lines": f"{chunk.start_line}-{chunk.end_line}",
                         "content": chunk.content_text or "",
-                        "match_type": "name" if name_match else "reference",
+                        "match_type": match_type,
                     })
 
-    # Strategy 2: If source file given, find tests that import it
-    import_tests = []
-    if file:
-        stem = Path(file).stem
-        for tf in test_files:
-            # Check if this test file imports the source module
-            imports = storage.conn.execute(
-                "SELECT symbol FROM imports WHERE source_file = ?",
-                (tf.id,),
-            ).fetchall()
-            if any(stem in (imp[0] or "") for imp in imports):
-                # This test file imports the source — get relevant chunks
-                chunks = storage.get_chunks_for_file(tf.id)
-                for chunk in chunks:
-                    if chunk.content_text and re.search(
-                        rf'\b{re.escape(function)}\b',
-                        chunk.content_text
-                    ):
-                        key = (tf.path, chunk.name)
-                        if key not in seen:
-                            seen.add(key)
-                            import_tests.append({
-                                "file": tf.path,
-                                "test_name": chunk.name,
-                                "kind": chunk.kind,
-                                "lines": f"{chunk.start_line}-{chunk.end_line}",
-                                "content": chunk.content_text or "",
-                                "match_type": "import",
-                            })
-
-    all_tests = matching_tests + import_tests
+    all_tests = matching_tests
 
     if not all_tests:
         msg = f"No tests found for '{function}'"
