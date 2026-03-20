@@ -34,8 +34,8 @@ benchmarks/
   reports/
     run-YYYY-MM-DDT-HHMM/       # one directory per full benchmark run
       summary.md                 # aggregate table + analysis for all queries
-      01-docker-setup.md         # per-query report
-      02-ci-pipeline.md
+      01-incremental-indexing.md  # per-query report
+      02-chunker-nesting.md
       ...
       30-dead-code.md
     run-YYYY-MM-DDT-HHMM/       # next run (e.g. after search improvements)
@@ -272,14 +272,14 @@ The answer requires understanding how Arrow decides what to return.
 
 | Arrow tool | Queries | Notes |
 |------------|---------|-------|
-| `get_context` | 1-6, 27-30 | Primary retrieval, tested across targeted/broad/needle-in-haystack |
+| `get_context` | 1-6, 27-30 | Primary retrieval — all queries now target Python source code (no Dockerfile/CI/README) |
 | `search_code` | 7-8 | Hybrid search without token budgeting |
-| `search_regex` | 9-10 | Direct Grep competitor |
+| `search_regex` | 9-10 | Direct Grep competitor — Q9 uses multiline pattern |
 | `search_structure` | 11-13 | AST-based symbol lookup |
 | `what_breaks_if_i_change` | 14-15 | Impact analysis (no traditional equivalent) |
 | `trace_dependencies` | 16-17 | Import graph traversal |
 | `get_tests_for` | 18-19 | Test discovery |
-| `get_diff_context` | 20 | Changed code + callers (requires uncommitted changes) |
+| `get_diff_context` | 20 | Changed code + callers (requires uncommitted changes — see setup note) |
 | `resolve_symbol` | 21-22 | Cross-repo symbol resolution (requires multiple indexed projects) |
 | `file_summary` | 23-24 | Per-file structural overview |
 | `project_summary` | 25 | Whole-project overview |
@@ -331,9 +331,10 @@ For each use case, record:
 
 ### Prerequisites
 
-1. Arrow MCP server running and index up to date: `arrow index /Users/andreas/arrow`
+1. Arrow MCP server running and index **force re-indexed**: `index_codebase(path="/Users/andreas/arrow", force=true)` — do NOT rely on auto-re-index during the run
 2. For `resolve_symbol` queries (21-22): at least one other repo indexed (e.g. `index_github_repo`)
-3. For `get_diff_context` query (20): have uncommitted changes in search.py
+3. For `get_diff_context` query (20): add a trivial uncommitted change to search.py before running, revert after
+4. For `search_regex` queries (9-10): pre-approve the tool by calling it once manually before the run
 
 ### Execution
 
